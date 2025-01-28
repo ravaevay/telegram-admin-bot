@@ -1,0 +1,17 @@
+version: '3.8'
+
+services:
+  telegram-bot:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: telegram-admin-bot2
+    restart: unless-stopped
+    env_file:
+      - .env
+    volumes:
+      - ./src:/app
+      - ./.ssh:/app/.ssh
+    ports:
+      - "8000:8000" # Если требуется доступ через вебхуки
+    command: python bot.py
