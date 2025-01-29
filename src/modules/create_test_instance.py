@@ -1,6 +1,6 @@
 import logging
 from config import DIGITALOCEAN_TOKEN
-from modules.database import save_instance
+from modules.database import save_instance, delete_instance
 import requests
 from datetime import datetime, timedelta
 import time
@@ -47,7 +47,7 @@ def get_images(token):
         return {"success": False, "message": str(e)}
 
 def create_droplet(token, name, ssh_key_id, droplet_type, image, duration, creator_id):
-    """Создать Droplet в DigitalOcean."""
+    """Создаёт Droplet в DigitalOcean."""
     try:
         expiration_date = (datetime.now() + timedelta(days=duration)).strftime("%Y-%m-%d %H:%M:%S")
         data = {
@@ -71,30 +71,39 @@ def create_droplet(token, name, ssh_key_id, droplet_type, image, duration, creat
 
         # Ожидание настройки IP
         ip_address = None
-        for _ in range(10):  # Максимум 10 попыток ожидания (10 * 5 = 50 секунд)
+        for _ in range(10):  # Максимум 10 попыток ожидания
             response = requests.get(BASE_URL + f"droplets/{droplet_id}", headers=HEADERS)
             response.raise_for_status()
-            droplet_data = response.json().get("droplet", {})
-            networks = droplet_data.get("networks", {}).get("v4", [])
+            networks = response.json().get("droplet", {}).get("networks", {}).get("v4", [])
             if networks:
                 ip_address = networks[0].get("ip_address")
                 break
-            time.sleep(5)  # Ждать 5 секунд перед следующей проверкой
+            time.sleep(5)
 
         if not ip_address:
             ip_address = "Не удалось получить IP-адрес"
 
         # Сохраняем данные в БД
         save_instance(droplet_id, name, droplet_type, expiration_date, ssh_key_id, creator_id)
+        logger.info(f"Инстанс {name} создан. ID: {droplet_id}, IP: {ip_address}, срок действия до {expiration_date}")
 
-        return {
-            "success": True,
-            "droplet_name": droplet_name,
-            "ip_address": ip_address,
-            "expiration_date": expiration_date
-        }
+        return {"success": True, "droplet_name": droplet_name, "ip_address": ip_address, "expiration_date": expiration_date}
 
     except requests.RequestException as e:
         logger.error(f"Ошибка при создании Droplet: {e}")
         return {"success": False, "message": str(e)}
 
+def delete_droplet(token, droplet_id):
+    """Удаляет Droplet из DigitalOcean и запись из базы данных."""
+    try:
+        response = requests.delete(f"{BASE_URL}droplets/{droplet_id}", headers={"Authorization": f"Bearer {token}"})
+        response.raise_for_status()
+        
+        # Удаление из базы данных
+        delete_instance(droplet_id)
+        logger.info(f"Инстанс ID {droplet_id} успешно удалён из DigitalOcean и базы данных.")
+
+        return {"success": True}
+    except requests.RequestException as e:
+        logger.error(f"Ошибка при удалении Droplet ID {droplet_id}: {e}")
+        return {"success": False, "message": str(e)}
