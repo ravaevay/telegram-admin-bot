@@ -4,7 +4,7 @@ from telegram.ext import Application, CommandHandler, CallbackQueryHandler, Mess
 from config import BOT_TOKEN, SSH_CONFIG, DIGITALOCEAN_TOKEN
 from modules.create_test_instance import create_droplet, get_ssh_keys, get_images
 from modules.authorization import is_authorized
-from modules.database import init_db, save_instance, get_expiring_instances, extend_instance_expiration
+from modules.database import init_db, save_instance, get_expiring_instances, extend_instance_expiration, delete_instance
 from modules.mail import create_mailbox, generate_password, reset_password
 from datetime import datetime
 
@@ -90,6 +90,7 @@ async def handle_action(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 "droplet_type": droplet_type
             }
             keyboard = [
+                [InlineKeyboardButton("1 день", callback_data="duration_1")],
                 [InlineKeyboardButton("3 дня", callback_data="duration_3")],
                 [InlineKeyboardButton("Неделя", callback_data="duration_7")],
                 [InlineKeyboardButton("2 недели", callback_data="duration_14")],
@@ -174,6 +175,13 @@ async def notify_and_check_instances(context: ContextTypes.DEFAULT_TYPE):
                     [InlineKeyboardButton("Продлить на 7 дней", callback_data=f"extend_7_{droplet_id}")]
                 ])
             )
+        elif time_left.total_seconds() <= 0:
+            delete_result = delete_droplet(DIGITALOCEAN_TOKEN, droplet_id)
+            if delete_result["success"]:
+                delete_instance(droplet_id)  # Удаляем запись из базы данных
+                logger.info(f"Инстанс '{name}' удалён, так как срок действия истёк.")
+            else:
+                logger.error(f"Ошибка при удалении инстанса '{name}': {delete_result['message']}")
 
 def main():
     """Запуск бота."""
