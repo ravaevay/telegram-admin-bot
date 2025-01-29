@@ -1,10 +1,11 @@
 import logging
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, CallbackQueryHandler, MessageHandler, filters, ContextTypes
-from config import BOT_TOKEN, DIGITALOCEAN_TOKEN
+from config import BOT_TOKEN, SSH_CONFIG, DIGITALOCEAN_TOKEN
 from modules.create_test_instance import create_droplet, get_ssh_keys, get_images
 from modules.authorization import is_authorized
 from modules.database import init_db, save_instance, get_expiring_instances, extend_instance_expiration
+from modules.mail import create_mailbox, generate_password, reset_password
 from datetime import datetime
 
 # Настройка логирования
@@ -31,6 +32,14 @@ async def handle_action(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     user_id = query.from_user.id
     await query.answer()
+
+    if query.data == "create_mailbox":
+        await query.message.reply_text("Введите имя почтового ящика:")
+        current_action[user_id] = {"action": "create_mailbox"}
+
+    elif query.data == "reset_password":
+        await query.message.reply_text("Введите имя почтового ящика для сброса пароля:")
+        current_action[user_id] = {"action": "reset_password"}
 
     if query.data == "create_droplet" and is_authorized(user_id, "droplet"):
         result = get_ssh_keys(DIGITALOCEAN_TOKEN)
@@ -106,6 +115,27 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Обработка сообщений от пользователя."""
     user_id = update.effective_user.id
     user_action = current_action.get(user_id)
+
+    if user_action and user_action.get("action") == "create_mailbox":
+        mailbox_name = update.message.text
+        password = generate_password()
+        result = create_mailbox(mailbox_name, password, SSH_CONFIG)
+        if result["success"]:
+            await update.message.reply_text(f"Почтовый ящик: {result['address']}\nПароль: {result['password']}")
+        else:
+            await update.message.reply_text(f"Ошибка: {result['message']}")
+        del current_action[user_id]
+    elif user_action and user_action.get("action") == "reset_password":
+        mailbox_name = update.message.text
+        new_password = generate_password()
+        result = reset_password(mailbox_name, new_password, SSH_CONFIG)
+        if result["success"]:
+            await update.message.reply_text(
+                f"Пароль успешно сброшен для {result['address']}.\nНовый пароль: {result['new_password']}"
+            )
+        else:
+            await update.message.reply_text(f"Ошибка: {result['message']}")
+        del current_action[user_id]
 
     if user_action and user_action.get("action") == "create_droplet":
         droplet_name = update.message.text
