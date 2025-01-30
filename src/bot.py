@@ -158,6 +158,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text(f"Ошибка: {result['message']}")
         del current_action[user_id]
 
+
 async def notify_and_check_instances(context: ContextTypes.DEFAULT_TYPE):
     """Фоновая задача для проверки инстансов и отправки уведомлений."""
     expiring_instances = get_expiring_instances()
@@ -190,6 +191,26 @@ async def notify_and_check_instances(context: ContextTypes.DEFAULT_TYPE):
             else:
                 logger.error(f"Ошибка при удалении инстанса '{name}': {delete_result['message']}")
 
+async def handle_extend_action(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Обработка продления срока действия инстанса."""
+    query = update.callback_query
+    await query.answer()
+
+    if query.data.startswith("extend_"):
+        parts = query.data.split("_")
+        days = int(parts[1])
+        droplet_id = int(parts[2])
+
+        extend_instance_expiration(droplet_id, days)
+        await query.message.reply_text(f"Срок действия инстанса продлён на {days} дней.")
+
+async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Обработчик исключений."""
+    logger.error(msg="Ошибка во время обработки обновления:", exc_info=context.error)
+    if isinstance(update, Update):
+        await update.message.reply_text("Произошла ошибка. Пожалуйста, попробуйте ещё раз.")
+
+
 def main():
     """Запуск бота."""
     logger.info("Запуск бота...")
@@ -199,7 +220,11 @@ def main():
 
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CallbackQueryHandler(handle_action))
+    app.add_handler(CallbackQueryHandler(handle_extend_action, pattern=r"^extend_"))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
+
+    # Обработчик ошибок
+    app.add_error_handler(error_handler)
 
     app.job_queue.run_repeating(notify_and_check_instances, interval=360)
 
