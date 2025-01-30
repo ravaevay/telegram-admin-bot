@@ -84,7 +84,7 @@ def create_droplet(token, name, ssh_key_id, droplet_type, image, duration, creat
             ip_address = "Не удалось получить IP-адрес"
 
         # Сохраняем данные в БД
-        save_instance(droplet_id, name, droplet_type, expiration_date, ssh_key_id, creator_id)
+        save_instance(droplet_id, name, ip_address, droplet_type, expiration_date, ssh_key_id, creator_id)
         logger.info(f"Инстанс {name} создан. ID: {droplet_id}, IP: {ip_address}, срок действия до {expiration_date}")
 
         return {"success": True, "droplet_name": droplet_name, "ip_address": ip_address, "expiration_date": expiration_date}

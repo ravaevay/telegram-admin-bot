@@ -2,7 +2,7 @@ import logging
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, CallbackQueryHandler, MessageHandler, filters, ContextTypes
 from config import BOT_TOKEN, SSH_CONFIG, DIGITALOCEAN_TOKEN
-from modules.create_test_instance import create_droplet, get_ssh_keys, get_images
+from modules.create_test_instance import create_droplet, get_ssh_keys, get_images, delete_droplet
 from modules.authorization import is_authorized
 from modules.database import init_db, save_instance, get_expiring_instances, extend_instance_expiration, delete_instance
 from modules.mail import create_mailbox, generate_password, reset_password
@@ -162,8 +162,15 @@ async def notify_and_check_instances(context: ContextTypes.DEFAULT_TYPE):
     """Фоновая задача для проверки инстансов и отправки уведомлений."""
     expiring_instances = get_expiring_instances()
     for instance in expiring_instances:
-        droplet_id, creator_id, name, ip_address, expiration_date, status = instance
-        expiration_date = datetime.strptime(expiration_date, "%Y-%m-%d %H:%M:%S")
+        droplet_id, name, ip_address, droplet_type, expiration_date, ssh_key_id, creator_id = instance
+        logger.info(f"DEBUG: expiration_date из БД: {expiration_date} (тип: {type(expiration_date)})")
+        if isinstance(expiration_date, int):  # Если это timestamp, конвертируем
+            expiration_date = datetime.fromtimestamp(expiration_date)
+        elif isinstance(expiration_date, str):  # Если строка, парсим
+            expiration_date = datetime.strptime(expiration_date, "%Y-%m-%d %H:%M:%S")
+        else:
+            logger.error(f"Ошибка: Неизвестный формат даты {expiration_date} (тип: {type(expiration_date)})")
+        #expiration_date = datetime.strptime(str(expiration_date), "%Y-%m-%d %H:%M:%S")
         time_left = expiration_date - datetime.now()
 
         if time_left.total_seconds() <= 86400:
@@ -178,7 +185,7 @@ async def notify_and_check_instances(context: ContextTypes.DEFAULT_TYPE):
         elif time_left.total_seconds() <= 0:
             delete_result = delete_droplet(DIGITALOCEAN_TOKEN, droplet_id)
             if delete_result["success"]:
-                delete_instance(droplet_id)  # Удаляем запись из базы данных
+                delete_droplet(droplet_id)  # Удаляем запись из базы данных
                 logger.info(f"Инстанс '{name}' удалён, так как срок действия истёк.")
             else:
                 logger.error(f"Ошибка при удалении инстанса '{name}': {delete_result['message']}")
@@ -194,7 +201,7 @@ def main():
     app.add_handler(CallbackQueryHandler(handle_action))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 
-    app.job_queue.run_repeating(notify_and_check_instances, interval=3600)
+    app.job_queue.run_repeating(notify_and_check_instances, interval=360)
 
     app.run_polling()
 
