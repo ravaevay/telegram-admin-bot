@@ -53,11 +53,19 @@ def create_mailbox(mailbox_name, password, ssh_config):
     if f"User '{mailbox_name}' exist" in result:
         return {"success": False, "message": f"Ящик {mailbox_name} уже существует."}
     
+    # Добавляем настройки подключения
+    connection_settings = (
+        f"**Настройки подключения:**\n"
+        f"📩 **IMAP**: 143 (STARTTLS)\n"
+        f"📤 **SMTP**: 587 (STARTTLS)\n"
+        f"🔑 **Метод аутентификации**: Простой пароль"
+    )
+    
     return {
         "success": True,
         "address": mailbox_name,
         "password": password,
-        "message": "Почтовый ящик успешно создан."
+        "message": f"✅ Почтовый ящик успешно создан!\n📧 **Email**: {mailbox_name}\n🔑 **Пароль**: {password}\n\n{connection_settings}"
     }
 
 def reset_password(mailbox_name, new_password, ssh_config):

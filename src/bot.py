@@ -139,7 +139,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         password = generate_password()
         result = create_mailbox(mailbox_name, password, SSH_CONFIG)
         if result["success"]:
-            await update.message.reply_text(f"Почтовый ящик: {result['address']}\nПароль: {result['password']}")
+            await update.message.reply_text(f"{result['message']}")
         else:
             await update.message.reply_text(f"Ошибка: {result['message']}")
         del current_action[user_id]
