@@ -19,3 +19,7 @@ AUTHORIZED_GROUPS = {
     "mail": list(map(int, os.getenv("AUTHORIZED_MAIL_USERS", "").split(","))),
     "droplet": list(map(int, os.getenv("AUTHORIZED_DROPLET_USERS", "").split(","))),
 }
+
+MAIL_DEFAULT_DOMAIN = os.getenv("MAIL_DEFAULT_DOMAIN")
+MAIL_DB_USER = os.getenv("MAIL_DB_USER")
+MAIL_DB_PASSWORD = os.getenv("MAIL_DB_PASSWORD")
