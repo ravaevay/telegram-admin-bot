@@ -57,7 +57,10 @@ async def handle_action(update: Update, context: ContextTypes.DEFAULT_TYPE):
         result = get_images(DIGITALOCEAN_TOKEN)
         if result["success"]:
             images = result["images"]
-            keyboard = [[InlineKeyboardButton(image["name"], callback_data=f"image_{image['id']}")] for image in images]
+            # Сортируем образы по 'distribution'
+            sorted_images = sorted(images, key=lambda x: x["distribution"])
+
+            keyboard = [[InlineKeyboardButton(f"{image['distribution']} {image['name']}", callback_data=f"image_{image['id']}")] for image in sorted_images]
             reply_markup = InlineKeyboardMarkup(keyboard)
             current_action[user_id] = {"action": "select_image", "ssh_key_id": ssh_key_id}
             await query.message.reply_text("Выберите образ:", reply_markup=reply_markup)
@@ -111,6 +114,20 @@ async def handle_action(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 "duration": duration
             }
             await query.message.reply_text("Введите имя инстанса:")
+    
+    elif query.data.startswith("extend_"):
+        parts = query.data.split("_")
+        days = int(parts[1])
+        droplet_id = int(parts[2])
+
+        logger.info(f"Продление инстанса ID {droplet_id} на {days} дней.")
+
+        result = extend_instance_expiration(droplet_id, days)
+        logger.info(f"extend_instance_expiration result - {result}")
+        if result:
+            await query.message.reply_text(f"Срок действия инстанса продлён на {days} дней.")
+        else:
+            await query.message.reply_text(f"Ошибка при продлении инстанса. Пожалуйста, попробуйте позже.")
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Обработка сообщений от пользователя."""
@@ -181,8 +198,9 @@ async def notify_and_check_instances(context: ContextTypes.DEFAULT_TYPE):
                 reply_markup=InlineKeyboardMarkup([
                     [InlineKeyboardButton("Продлить на 3 дня", callback_data=f"extend_3_{droplet_id}")],
                     [InlineKeyboardButton("Продлить на 7 дней", callback_data=f"extend_7_{droplet_id}")]
-                ])
+                ])        
             )
+        
         elif time_left.total_seconds() <= 0:
             delete_result = delete_droplet(DIGITALOCEAN_TOKEN, droplet_id)
             if delete_result["success"]:
@@ -190,19 +208,7 @@ async def notify_and_check_instances(context: ContextTypes.DEFAULT_TYPE):
                 logger.info(f"Инстанс '{name}' удалён, так как срок действия истёк.")
             else:
                 logger.error(f"Ошибка при удалении инстанса '{name}': {delete_result['message']}")
-
-async def handle_extend_action(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Обработка продления срока действия инстанса."""
-    query = update.callback_query
-    await query.answer()
-
-    if query.data.startswith("extend_"):
-        parts = query.data.split("_")
-        days = int(parts[1])
-        droplet_id = int(parts[2])
-
-        extend_instance_expiration(droplet_id, days)
-        await query.message.reply_text(f"Срок действия инстанса продлён на {days} дней.")
+  
 
 async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Обработчик исключений."""
@@ -220,13 +226,12 @@ def main():
 
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CallbackQueryHandler(handle_action))
-    app.add_handler(CallbackQueryHandler(handle_extend_action, pattern=r"^extend_"))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 
     # Обработчик ошибок
     app.add_error_handler(error_handler)
 
-    app.job_queue.run_repeating(notify_and_check_instances, interval=360)
+    app.job_queue.run_repeating(notify_and_check_instances, interval=43200)
 
     app.run_polling()
 
