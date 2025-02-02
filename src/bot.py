@@ -1,4 +1,5 @@
 import logging
+import asyncio
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, CallbackQueryHandler, MessageHandler, filters, ContextTypes
 from config import BOT_TOKEN, SSH_CONFIG, DIGITALOCEAN_TOKEN
@@ -129,6 +130,17 @@ async def handle_action(update: Update, context: ContextTypes.DEFAULT_TYPE):
         else:
             await query.message.reply_text(f"Ошибка при продлении инстанса. Пожалуйста, попробуйте позже.")
 
+    elif query.data.startswith("delete_"):
+        droplet_id = int(query.data.split("_")[1])
+
+        delete_result = delete_droplet(DIGITALOCEAN_TOKEN, droplet_id)
+        if delete_result["success"]:
+            delete_instance(droplet_id)  # Удаляем запись из базы данных
+            await query.message.edit_text(f"✅ Инстанс был успешно удалён!")
+            logger.info(f"Инстанс {droplet_id} был удалён по запросу пользователя.")
+        else:
+            await query.message.reply_text(f"❌ Ошибка при удалении инстанса: {delete_result['message']}")
+
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Обработка сообщений от пользователя."""
     user_id = update.effective_user.id
@@ -179,35 +191,54 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def notify_and_check_instances(context: ContextTypes.DEFAULT_TYPE):
     """Фоновая задача для проверки инстансов и отправки уведомлений."""
     expiring_instances = get_expiring_instances()
+    
     for instance in expiring_instances:
-        droplet_id, name, ip_address, droplet_type, expiration_date, ssh_key_id, creator_id = instance
-        logger.info(f"DEBUG: expiration_date из БД: {expiration_date} (тип: {type(expiration_date)})")
-        if isinstance(expiration_date, int):  # Если это timestamp, конвертируем
-            expiration_date = datetime.fromtimestamp(expiration_date)
-        elif isinstance(expiration_date, str):  # Если строка, парсим
-            expiration_date = datetime.strptime(expiration_date, "%Y-%m-%d %H:%M:%S")
-        else:
-            logger.error(f"Ошибка: Неизвестный формат даты {expiration_date} (тип: {type(expiration_date)})")
-        #expiration_date = datetime.strptime(str(expiration_date), "%Y-%m-%d %H:%M:%S")
-        time_left = expiration_date - datetime.now()
+        try:
+            droplet_id, name, ip_address, droplet_type, expiration_date, ssh_key_id, creator_id = instance
+            
+            logger.info(f"DEBUG: expiration_date из БД: {expiration_date} (тип: {type(expiration_date)})")
 
-        if time_left.total_seconds() <= 86400:
-            user_chat = await context.bot.get_chat(creator_id)
-            await user_chat.send_message(
-                f"Инстанс '{name}' с IP {ip_address} будет удалён через 24 часа. Хотите продлить срок действия?",
-                reply_markup=InlineKeyboardMarkup([
-                    [InlineKeyboardButton("Продлить на 3 дня", callback_data=f"extend_3_{droplet_id}")],
-                    [InlineKeyboardButton("Продлить на 7 дней", callback_data=f"extend_7_{droplet_id}")]
-                ])        
-            )
-        
-        elif time_left.total_seconds() <= 0:
-            delete_result = delete_droplet(DIGITALOCEAN_TOKEN, droplet_id)
-            if delete_result["success"]:
-                delete_droplet(droplet_id)  # Удаляем запись из базы данных
-                logger.info(f"Инстанс '{name}' удалён, так как срок действия истёк.")
-            else:
-                logger.error(f"Ошибка при удалении инстанса '{name}': {delete_result['message']}")
+            # Приводим expiration_date к datetime
+            if isinstance(expiration_date, int):  # Если это timestamp, конвертируем
+                expiration_date = datetime.fromtimestamp(expiration_date)
+            elif isinstance(expiration_date, str):  # Если строка, парсим
+                try:
+                    expiration_date = datetime.strptime(expiration_date, "%Y-%m-%d %H:%M:%S")
+                except ValueError:
+                    logger.error(f"Ошибка при разборе даты: {expiration_date}")
+                    continue  # Пропускаем этот инстанс
+
+            time_left = (expiration_date - datetime.now()).total_seconds()
+            logger.info(f"DEBUG: Времени до удаления: {time_left} секунд")
+
+            if 0 < time_left <= 86400:  # Уведомление за 24 часа до удаления
+                try:
+                    user_chat = await context.bot.get_chat(creator_id)
+                    await user_chat.send_message(
+                        f"⚠️ Инстанс **'{name}'** с IP **{ip_address}** будет удалён через 24 часа.\n"
+                        f"Хотите продлить срок действия или удалить его сейчас?",
+                        reply_markup=InlineKeyboardMarkup([
+                            [InlineKeyboardButton("Продлить на 3 дня", callback_data=f"extend_3_{droplet_id}")],
+                            [InlineKeyboardButton("Продлить на 7 дней", callback_data=f"extend_7_{droplet_id}")],
+                            [InlineKeyboardButton("🗑 Удалить сейчас", callback_data=f"delete_{droplet_id}")]
+                        ])
+                    )
+                    logger.info(f"Уведомление отправлено пользователю {creator_id} о предстоящем удалении инстанса '{name}'.")
+                except Exception as e:
+                    logger.error(f"Ошибка отправки сообщения пользователю {creator_id}: {e}")
+
+            elif time_left <= 0:  # Удаление, если время истекло
+                logger.info(f"Инстанс '{name}' с ID {droplet_id} должен быть удалён. Запускаем удаление...")
+                delete_result = delete_droplet(DIGITALOCEAN_TOKEN, droplet_id)
+
+                if delete_result["success"]:
+                    delete_instance(droplet_id)  # Удаляем запись из базы данных
+                    logger.info(f"✅ Инстанс '{name}' удалён, так как срок действия истёк.")
+                else:
+                    logger.error(f"❌ Ошибка при удалении инстанса '{name}': {delete_result['message']}")
+
+        except Exception as e:
+            logger.error(f"Ошибка при обработке инстанса {instance}: {e}")
   
 
 async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
