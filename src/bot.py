@@ -35,14 +35,23 @@ async def handle_action(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await query.answer()
 
     if query.data == "create_mailbox":
+        if not is_authorized(user_id, "mail"):
+            await query.message.reply_text("❌ У вас нет прав для создания почтовых ящиков.")
+            return
         await query.message.reply_text("Введите имя почтового ящика:")
         current_action[user_id] = {"action": "create_mailbox"}
 
     elif query.data == "reset_password":
+        if not is_authorized(user_id, "mail"):
+            await query.message.reply_text("❌ У вас нет прав для сброса паролей почтовых ящиков.")
+            return
         await query.message.reply_text("Введите имя почтового ящика для сброса пароля:")
         current_action[user_id] = {"action": "reset_password"}
 
-    if query.data == "create_droplet" and is_authorized(user_id, "droplet"):
+    if query.data == "create_droplet":
+        if not is_authorized(user_id, "droplet"):
+            await query.message.reply_text("❌ У вас нет прав для создания инстансов в DigitalOcean.")
+            return
         result = get_ssh_keys(DIGITALOCEAN_TOKEN)
         if result["success"]:
             ssh_keys = result["keys"]
