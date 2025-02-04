@@ -9,3 +9,11 @@ def is_authorized(user_id, module):
         return True
     logger.warning(f"Пользователь {user_id} не авторизован для модуля {module}.")
     return False
+
+def is_authorized_for_bot(user_id):
+    """Проверка авторизации пользователя для работы с ботом."""
+    if any(user_id in users for users in AUTHORIZED_GROUPS.values()):
+        return True
+    logger.warning(f"Пользователь {user_id} не авторизован для работы с ботом.")
+    return False
+

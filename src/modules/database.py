@@ -13,6 +13,7 @@ def init_db():
     CREATE TABLE IF NOT EXISTS instances (
         droplet_id INTEGER PRIMARY KEY,
         name TEXT NOT NULL,
+        ip_address TEXT NOT NULL,
         droplet_type TEXT NOT NULL,
         expiration_date TEXT NOT NULL,
         ssh_key_id INTEGER NOT NULL,
@@ -23,15 +24,15 @@ def init_db():
     connection.close()
     logger.info("База данных инициализирована.")
 
-def save_instance(droplet_id, name, droplet_type, expiration_date, ssh_key_id, creator_id):
+def save_instance(droplet_id, name, ip_address, droplet_type, expiration_date, ssh_key_id, creator_id):
     """Сохранение информации об инстансе в базу данных."""
     try:
         connection = sqlite3.connect(DB_PATH)
         cursor = connection.cursor()
         cursor.execute("""
-        INSERT INTO instances (droplet_id, name, droplet_type, expiration_date, ssh_key_id, creator_id)
-        VALUES (?, ?, ?, ?, ?, ?)
-        """, (droplet_id, name, droplet_type, expiration_date, ssh_key_id, creator_id))
+        INSERT INTO instances (droplet_id, name, ip_address, droplet_type, expiration_date, ssh_key_id, creator_id)
+        VALUES (?, ?, ?, ?, ?, ?, ?)
+        """, (droplet_id, name, ip_address, droplet_type, expiration_date, ssh_key_id, creator_id))
         connection.commit()
         logger.info(f"Инстанс {name} (ID: {droplet_id}) сохранён в базе данных.")
     except sqlite3.Error as e:
@@ -45,7 +46,7 @@ def get_expiring_instances():
         connection = sqlite3.connect(DB_PATH)
         cursor = connection.cursor()
         cursor.execute("""
-        SELECT droplet_id, name, droplet_type, expiration_date, ssh_key_id, creator_id
+        SELECT droplet_id, name, ip_address, droplet_type, expiration_date, ssh_key_id, creator_id
         FROM instances
         WHERE expiration_date <= datetime('now', '+1 day')
         """)

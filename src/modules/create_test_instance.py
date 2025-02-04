@@ -34,14 +34,22 @@ def get_ssh_keys(token):
         return {"success": False, "message": str(e)}
 
 def get_images(token):
-    """Получить список доступных образов из DigitalOcean."""
+    """Получить список доступных образов из DigitalOcean (только Ubuntu, CentOS, Fedora)."""
     try:
         response = requests.get(BASE_URL + "images?type=distribution", headers={
             "Authorization": f"Bearer {token}"
         })
         response.raise_for_status()
         images = response.json().get("images", [])
-        return {"success": True, "images": images}
+
+        # Фильтруем образы, оставляя только Ubuntu, CentOS и Fedora
+        allowed_distributions = {"Ubuntu", "CentOS", "Fedora"}
+        filtered_images = [image for image in images if image["distribution"] in allowed_distributions]
+
+        # Сортируем по названию дистрибутива
+        sorted_images = sorted(filtered_images, key=lambda x: x["distribution"])
+
+        return {"success": True, "images": sorted_images}
     except requests.RequestException as e:
         logger.error(f"Ошибка при получении образов: {e}")
         return {"success": False, "message": str(e)}
@@ -84,7 +92,7 @@ def create_droplet(token, name, ssh_key_id, droplet_type, image, duration, creat
             ip_address = "Не удалось получить IP-адрес"
 
         # Сохраняем данные в БД
-        save_instance(droplet_id, name, droplet_type, expiration_date, ssh_key_id, creator_id)
+        save_instance(droplet_id, name, ip_address, droplet_type, expiration_date, ssh_key_id, creator_id)
         logger.info(f"Инстанс {name} создан. ID: {droplet_id}, IP: {ip_address}, срок действия до {expiration_date}")
 
         return {"success": True, "droplet_name": droplet_name, "ip_address": ip_address, "expiration_date": expiration_date}
