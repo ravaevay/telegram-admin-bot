@@ -15,10 +15,18 @@ logger = logging.getLogger(__name__)
 
 current_action = {}
 
+allowed_users = set()  # Список пользователей, которые начали диалог
+
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Приветственное сообщение с выбором действий."""
     user_id = update.effective_user.id
-    logger.info(f"Команда /start от пользователя {user_id}")
+    chat_id = update.effective_chat.id
+
+    # Если это группа, запоминаем пользователя, отправившего /start
+    if update.effective_chat.type in ["group", "supergroup"]:
+        allowed_users.add(user_id)
+
+    logger.info(f"Команда /start от пользователя {user_id} в чате {chat_id}")
 
     keyboard = [
         [InlineKeyboardButton("Создать почтовый ящик", callback_data="create_mailbox")],
@@ -32,6 +40,12 @@ async def handle_action(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Обработка нажатий на кнопки."""
     query = update.callback_query
     user_id = query.from_user.id
+
+    # Проверяем, разрешено ли этому пользователю нажимать кнопки
+    if user_id not in allowed_users:
+        await query.answer("❌ У вас нет доступа к этой кнопке.", show_alert=True)
+        return
+    
     await query.answer()
 
     if query.data == "create_mailbox":
