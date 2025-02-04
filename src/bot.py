@@ -4,7 +4,7 @@ from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, CallbackQueryHandler, MessageHandler, filters, ContextTypes
 from config import BOT_TOKEN, SSH_CONFIG, DIGITALOCEAN_TOKEN
 from modules.create_test_instance import create_droplet, get_ssh_keys, get_images, delete_droplet
-from modules.authorization import is_authorized
+from modules.authorization import is_authorized, is_authorized_for_bot
 from modules.database import init_db, save_instance, get_expiring_instances, extend_instance_expiration, delete_instance
 from modules.mail import create_mailbox, generate_password, reset_password
 from datetime import datetime
@@ -22,6 +22,11 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     chat_id = update.effective_chat.id
 
+    if not is_authorized_for_bot(user_id):
+        logger.warning(f"⚠️ Доступ запрещён для {user_id}")
+        await update.message.reply_text("❌ У вас нет доступа к этому боту.")
+        return
+    
     # Если это группа, запоминаем пользователя, отправившего /start
     if update.effective_chat.type in ["group", "supergroup"]:
         allowed_users.add(user_id)
@@ -42,9 +47,10 @@ async def handle_action(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = query.from_user.id
 
     # Проверяем, разрешено ли этому пользователю нажимать кнопки
-    if user_id not in allowed_users:
-        await query.answer("❌ У вас нет доступа к этой кнопке.", show_alert=True)
-        return
+    if update.effective_chat.type in ["group", "supergroup"]:
+        if user_id not in allowed_users:
+            await query.answer("❌ У вас нет доступа к этой кнопке.", show_alert=True)
+            return
     
     await query.answer()
 
