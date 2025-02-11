@@ -55,17 +55,23 @@ def create_mailbox(mailbox_name, password, ssh_config):
     
     # Добавляем настройки подключения
     connection_settings = (
-        f"**Настройки подключения:**\n"
-        f"📩 **IMAP**: 143 (STARTTLS)\n"
-        f"📤 **SMTP**: 587 (STARTTLS)\n"
-        f"🔑 **Метод аутентификации**: Simple password"
+        f"**Mailbox Settings:**\n"
+        f"Email Address: {mailbox_name}\n"
+        f"IMAP and SMTP Username: {mailbox_name}\n"
+        f"IMAP and SMTP Password: {password}\n"
+
+        f"IMAP and SMTP Server - mx1.onlyoffice.com\n"
+
+        f"📩 IMAP Port: 143 (STARTTLS)\n"
+        f"📤 SMTP Port: 587 (STARTTLS)\n"
+        f"🔑 Authentification Method: Simple password"
     )
     
     return {
         "success": True,
         "address": mailbox_name,
         "password": password,
-        "message": f"✅ Почтовый ящик успешно создан!\n📧 **Email**: {mailbox_name}\n🔑 **Пароль**: {password}\n\n{connection_settings}"
+        "message": f"✅ Mailbox successfully created !\n📧 **Email**: {mailbox_name}\n🔑 **Password**: {password}\n\n{connection_settings}"
     }
 
 def reset_password(mailbox_name, new_password, ssh_config):
