@@ -291,7 +291,7 @@ def main():
     # Обработчик ошибок
     app.add_error_handler(error_handler)
 
-    app.job_queue.run_repeating(notify_and_check_instances, interval=43200)
+    app.job_queue.run_repeating(notify_and_check_instances, interval=43200) #43200
 
     app.run_polling()
 

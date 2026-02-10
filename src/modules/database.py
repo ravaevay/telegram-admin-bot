@@ -1,5 +1,6 @@
 import sqlite3
 import logging
+from datetime import datetime, timedelta
 
 logger = logging.getLogger(__name__)
 
@@ -59,19 +60,37 @@ def get_expiring_instances():
         connection.close()
 
 def extend_instance_expiration(droplet_id, days):
-    """Продлить срок действия инстанса."""
+    """Продлить срок действия инстанса в базе данных."""
+    connection = sqlite3.connect("instances.db")
+    cursor = connection.cursor()
+    
+    logger.info(f"🔄 Продление инстанса ID {droplet_id} на {days} дней")
+
     try:
-        connection = sqlite3.connect(DB_PATH)
-        cursor = connection.cursor()
-        cursor.execute("""
-        UPDATE instances
-        SET expiration_date = datetime(expiration_date, ? || ' days')
-        WHERE droplet_id = ?
-        """, (days, droplet_id))
+        # Получаем текущее expiration_date
+        cursor.execute("SELECT expiration_date FROM instances WHERE droplet_id = ?", (droplet_id,))
+        row = cursor.fetchone()
+        if not row:
+            logger.error(f"❌ Инстанс ID {droplet_id} не найден в БД.")
+            return None  # ✅ Возвращаем None, если инстанса нет
+
+        current_expiration = datetime.strptime(row[0], "%Y-%m-%d %H:%M:%S")
+        new_expiration = current_expiration + timedelta(days=days)
+        new_expiration_str = new_expiration.strftime("%Y-%m-%d %H:%M:%S")
+
+        # Обновляем expiration_date
+        cursor.execute(
+            "UPDATE instances SET expiration_date = ? WHERE droplet_id = ?",
+            (new_expiration_str, droplet_id)
+        )
         connection.commit()
-        logger.info(f"Инстанс ID {droplet_id} продлён на {days} дней.")
-    except sqlite3.Error as e:
-        logger.error(f"Ошибка при продлении инстанса ID {droplet_id}: {e}")
+
+        logger.info(f"✅ Инстанс {droplet_id} продлен до {new_expiration_str}")
+        return new_expiration_str  # ✅ Теперь функция возвращает новую дату
+
+    except Exception as e:
+        logger.error(f"❌ Ошибка при продлении инстанса: {e}")
+        return None  # ✅ Возвращаем None в случае ошибки
     finally:
         connection.close()
 

@@ -43,11 +43,13 @@ def get_images(token):
         images = response.json().get("images", [])
 
         # Фильтруем образы, оставляя только Ubuntu, CentOS и Fedora
-        allowed_distributions = {"Ubuntu", "CentOS", "Fedora"}
-        filtered_images = [image for image in images if image["distribution"] in allowed_distributions]
+        # allowed_distributions = {"Ubuntu", "CentOS", "Fedora", "Debian"}
+        # filtered_images = [image for image in images if image["distribution"] in allowed_distributions]
 
         # Сортируем по названию дистрибутива
-        sorted_images = sorted(filtered_images, key=lambda x: x["distribution"])
+        # sorted_images = sorted(filtered_images, key=lambda x: x["distribution"])
+
+        sorted_images = sorted(images, key=lambda x: x["distribution"])
 
         return {"success": True, "images": sorted_images}
     except requests.RequestException as e:
