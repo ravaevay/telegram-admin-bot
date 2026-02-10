@@ -25,18 +25,33 @@ python show_entries.py
 python src/fix_db.py
 ```
 
-There are no tests, linter, or CI/CD configured.
+## Lint & Test
+
+```bash
+# Lint (Ruff — config in pyproject.toml)
+ruff check src/
+ruff format --check src/
+
+# Tests (pytest)
+pytest tests/ -v
+```
+
+CI/CD: `.github/workflows/ci.yml` — lint + test on push/PR to main; Docker build+push on `v*.*.*` tags.
+
+**Testing gotcha:** `config.py` calls `int(os.getenv(...))` at import time. Tests must set env vars (e.g. `AUTHORIZED_MAIL_USERS=1`) *before* any `src/` import. This is handled in `tests/conftest.py`.
+
+**Database tests:** `database.py` has module-level `DB_PATH`. Tests use `monkeypatch.setattr` to redirect to a temp file via the `tmp_db` fixture.
 
 ## Architecture
 
 **Entry point:** `src/bot.py` — registers all handlers and starts polling.
 
-**State machine pattern:** Multi-step user workflows (mailbox creation, password reset, droplet creation) use a global `current_action` dict keyed by `user_id` to track conversation state across button clicks and text inputs.
+**State machine pattern:** Multi-step user workflows use `ConversationHandler` from python-telegram-bot with states and `context.user_data` to track conversation state.
 
 **Handler flow:**
 - `/start` → `start()` shows inline keyboard with 3 actions
-- `CallbackQueryHandler` → `handle_action()` routes button presses by callback data prefix (`create_mailbox`, `reset_password`, `create_droplet`, `ssh_key_*`, `image_*`, `droplet_type_*`, `duration_*`, `extend_*`, `delete_*`)
-- `MessageHandler` → `handle_message()` captures text input, routed by `current_action` state
+- Three `ConversationHandler`s (mail creation, password reset, droplet creation) route callback/text input through state machines
+- Standalone `CallbackQueryHandler`s for `extend_*` and `delete_*` actions
 
 **Background job:** `notify_and_check_instances()` runs every 12 hours via `job_queue`. It warns creators about expiring droplets (within 24h) and auto-deletes expired ones.
 
