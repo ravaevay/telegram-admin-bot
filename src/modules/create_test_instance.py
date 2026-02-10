@@ -23,11 +23,15 @@ DROPLET_TYPES = {
 def get_ssh_keys(token):
     """Получить список SSH-ключей из DigitalOcean."""
     try:
-        response = requests.get(BASE_URL + "account/keys", headers={
-            "Authorization": f"Bearer {token}"
-        })
-        response.raise_for_status()
-        keys = response.json().get("ssh_keys", [])
+        keys = []
+        url = BASE_URL + "account/keys?per_page=200"
+        headers = {"Authorization": f"Bearer {token}"}
+        while url:
+            response = requests.get(url, headers=headers)
+            response.raise_for_status()
+            data = response.json()
+            keys.extend(data.get("ssh_keys", []))
+            url = data.get("links", {}).get("pages", {}).get("next")
         return {"success": True, "keys": keys}
     except requests.RequestException as e:
         logger.error(f"Ошибка при получении SSH-ключей: {e}")
