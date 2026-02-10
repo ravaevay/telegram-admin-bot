@@ -60,7 +60,7 @@ def get_expiring_instances():
             cursor = connection.execute("""
             SELECT droplet_id, name, ip_address, droplet_type, expiration_date, ssh_key_id, creator_id
             FROM instances
-            WHERE expiration_date <= datetime('now', '+1 day')
+            WHERE expiration_date <= datetime('now', 'localtime', '+1 day')
             """)
             return cursor.fetchall()
     except sqlite3.Error as e:

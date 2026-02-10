@@ -19,7 +19,7 @@ from modules.create_test_instance import create_droplet, get_ssh_keys, get_image
 from modules.authorization import is_authorized, is_authorized_for_bot
 from modules.database import (
     init_db, get_expiring_instances,
-    extend_instance_expiration, delete_instance, get_instance_by_id,
+    extend_instance_expiration, get_instance_by_id,
 )
 from modules.mail import create_mailbox, generate_password, reset_password
 from datetime import datetime
@@ -342,7 +342,6 @@ async def handle_delete(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     delete_result = await delete_droplet(DIGITALOCEAN_TOKEN, droplet_id)
     if delete_result["success"]:
-        delete_instance(droplet_id)
         await query.message.edit_text("Инстанс был успешно удалён!")
         logger.info(f"Инстанс {droplet_id} был удалён по запросу пользователя {user_id}.")
     else:
@@ -415,7 +414,6 @@ async def notify_and_check_instances(context: ContextTypes.DEFAULT_TYPE):
                 delete_result = await delete_droplet(DIGITALOCEAN_TOKEN, droplet_id)
 
                 if delete_result["success"]:
-                    delete_instance(droplet_id)
                     logger.info(f"Инстанс '{name}' удалён, так как срок действия истёк.")
                 else:
                     logger.error(f"Ошибка при удалении инстанса '{name}': {delete_result['message']}")
