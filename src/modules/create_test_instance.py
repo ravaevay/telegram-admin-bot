@@ -21,12 +21,12 @@ DROPLET_TYPES = {
 IP_POLL_ATTEMPTS = 10
 IP_POLL_INTERVAL = 5  # seconds
 
-_MD_ESCAPE_RE = re.compile(r'([_*\[\]()~`>#+\-=|{}.!\\])')
+_MD_ESCAPE_RE = re.compile(r"([_*\[\]()~`>#+\-=|{}.!\\])")
 
 
 def _escape_md(text):
     """Экранирование спецсимволов для Telegram MarkdownV2."""
-    return _MD_ESCAPE_RE.sub(r'\\\1', str(text))
+    return _MD_ESCAPE_RE.sub(r"\\\1", str(text))
 
 
 def _auth_headers(token):
@@ -119,7 +119,13 @@ async def create_droplet(token, name, ssh_key_id, droplet_type, image, duration,
             f"Expires: `{_escape_md(expiration_date)}`"
         )
 
-        return {"success": True, "droplet_name": droplet_name, "ip_address": ip_address, "expiration_date": expiration_date, "message": msg}
+        return {
+            "success": True,
+            "droplet_name": droplet_name,
+            "ip_address": ip_address,
+            "expiration_date": expiration_date,
+            "message": msg,
+        }
 
     except httpx.HTTPError as e:
         logger.error(f"Ошибка при создании Droplet: {e}")

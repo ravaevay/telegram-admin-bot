@@ -18,8 +18,10 @@ from config import BOT_TOKEN, SSH_CONFIG, DIGITALOCEAN_TOKEN
 from modules.create_test_instance import create_droplet, get_ssh_keys, get_images, delete_droplet
 from modules.authorization import is_authorized, is_authorized_for_bot
 from modules.database import (
-    init_db, get_expiring_instances,
-    extend_instance_expiration, get_instance_by_id,
+    init_db,
+    get_expiring_instances,
+    extend_instance_expiration,
+    get_instance_by_id,
 )
 from modules.mail import create_mailbox, generate_password, reset_password
 from datetime import datetime
@@ -34,7 +36,7 @@ logger = logging.getLogger(__name__)
 NOTIFY_INTERVAL_SECONDS = 43200  # 12 hours
 CONVERSATION_TIMEOUT = 600  # 10 minutes
 
-DROPLET_NAME_RE = re.compile(r'^[a-zA-Z0-9][a-zA-Z0-9._-]{0,253}[a-zA-Z0-9]$')
+DROPLET_NAME_RE = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9._-]{0,253}[a-zA-Z0-9]$")
 
 # ConversationHandler states
 MAIL_INPUT = 0
@@ -46,6 +48,7 @@ allowed_users = set()
 
 
 # --- /start ---
+
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Приветственное сообщение с выбором действий."""
@@ -72,6 +75,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 # --- Mail creation conversation ---
+
 
 async def mail_create_entry(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     """Начало создания почтового ящика."""
@@ -108,6 +112,7 @@ async def mail_create_input(update: Update, context: ContextTypes.DEFAULT_TYPE) 
 
 # --- Password reset conversation ---
 
+
 async def reset_entry(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     """Начало сброса пароля."""
     query = update.callback_query
@@ -143,6 +148,7 @@ async def reset_input(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int
 
 # --- Droplet creation conversation ---
 
+
 async def droplet_entry(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     """Начало создания инстанса — выбор SSH-ключа."""
     query = update.callback_query
@@ -164,10 +170,7 @@ async def droplet_entry(update: Update, context: ContextTypes.DEFAULT_TYPE) -> i
         return ConversationHandler.END
 
     ssh_keys = result["keys"]
-    keyboard = [
-        [InlineKeyboardButton(key["name"], callback_data=f"ssh_key_{key['id']}")]
-        for key in ssh_keys
-    ]
+    keyboard = [[InlineKeyboardButton(key["name"], callback_data=f"ssh_key_{key['id']}")] for key in ssh_keys]
     reply_markup = InlineKeyboardMarkup(keyboard)
     await query.message.reply_text("Выберите SSH ключ:", reply_markup=reply_markup)
     return SELECT_SSH_KEY
@@ -189,10 +192,12 @@ async def droplet_select_ssh_key(update: Update, context: ContextTypes.DEFAULT_T
     images = result["images"]
     sorted_images = sorted(images, key=lambda x: x["distribution"])
     keyboard = [
-        [InlineKeyboardButton(
-            f"{image['distribution']} {image['name']}",
-            callback_data=f"image_{image['id']}",
-        )]
+        [
+            InlineKeyboardButton(
+                f"{image['distribution']} {image['name']}",
+                callback_data=f"image_{image['id']}",
+            )
+        ]
         for image in sorted_images
     ]
     reply_markup = InlineKeyboardMarkup(keyboard)
@@ -286,6 +291,7 @@ async def droplet_input_name(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
 # --- Standalone callback handlers (extend / delete with ownership check) ---
 
+
 async def handle_extend(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Продление срока инстанса с проверкой владельца."""
     query = update.callback_query
@@ -350,6 +356,7 @@ async def handle_delete(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # --- Conversation cancel / timeout ---
 
+
 async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     """Отмена текущей операции."""
     context.user_data.clear()
@@ -365,11 +372,14 @@ async def conversation_timeout(update: Update, context: ContextTypes.DEFAULT_TYP
     """Обработка таймаута разговора."""
     context.user_data.clear()
     if update and update.effective_message:
-        await update.effective_message.reply_text("Время ожидания истекло. Операция отменена. Используйте /start для начала.")
+        await update.effective_message.reply_text(
+            "Время ожидания истекло. Операция отменена. Используйте /start для начала."
+        )
     return ConversationHandler.END
 
 
 # --- Background job ---
+
 
 async def notify_and_check_instances(context: ContextTypes.DEFAULT_TYPE):
     """Фоновая задача для проверки инстансов и отправки уведомлений."""
@@ -399,13 +409,17 @@ async def notify_and_check_instances(context: ContextTypes.DEFAULT_TYPE):
                     await user_chat.send_message(
                         f"Инстанс **'{name}'** с IP **{ip_address}** будет удалён через 24 часа.\n"
                         f"Хотите продлить срок действия или удалить его сейчас?",
-                        reply_markup=InlineKeyboardMarkup([
-                            [InlineKeyboardButton("Продлить на 3 дня", callback_data=f"extend_3_{droplet_id}")],
-                            [InlineKeyboardButton("Продлить на 7 дней", callback_data=f"extend_7_{droplet_id}")],
-                            [InlineKeyboardButton("Удалить сейчас", callback_data=f"delete_{droplet_id}")],
-                        ]),
+                        reply_markup=InlineKeyboardMarkup(
+                            [
+                                [InlineKeyboardButton("Продлить на 3 дня", callback_data=f"extend_3_{droplet_id}")],
+                                [InlineKeyboardButton("Продлить на 7 дней", callback_data=f"extend_7_{droplet_id}")],
+                                [InlineKeyboardButton("Удалить сейчас", callback_data=f"delete_{droplet_id}")],
+                            ]
+                        ),
                     )
-                    logger.info(f"Уведомление отправлено пользователю {creator_id} о предстоящем удалении инстанса '{name}'.")
+                    logger.info(
+                        f"Уведомление отправлено пользователю {creator_id} о предстоящем удалении инстанса '{name}'."
+                    )
                 except Exception as e:
                     logger.error(f"Ошибка отправки сообщения пользователю {creator_id}: {e}")
 
@@ -424,6 +438,7 @@ async def notify_and_check_instances(context: ContextTypes.DEFAULT_TYPE):
 
 # --- Error handler ---
 
+
 async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Обработчик исключений."""
     logger.error(msg="Ошибка во время обработки обновления:", exc_info=context.error)
@@ -438,6 +453,7 @@ async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> N
 
 # --- Helpers ---
 
+
 def _check_group_access(update: Update, user_id: int) -> bool:
     """Проверка доступа пользователя в групповом чате."""
     if update.effective_chat.type in ["group", "supergroup"]:
@@ -446,6 +462,7 @@ def _check_group_access(update: Update, user_id: int) -> bool:
 
 
 # --- Main ---
+
 
 def main():
     """Запуск бота."""

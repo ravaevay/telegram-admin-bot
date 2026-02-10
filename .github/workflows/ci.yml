@@ -1,0 +1,74 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*.*.*"]
+  pull_request:
+    branches: [main]
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.9"
+
+      - run: pip install ruff
+
+      - run: ruff check src/
+
+      - run: ruff format --check src/
+
+  test:
+    needs: lint
+    runs-on: ubuntu-latest
+    env:
+      BOT_TOKEN: "fake-token"
+      SSH_HOST: "127.0.0.1"
+      SSH_PORT: "22"
+      SSH_USERNAME: "test"
+      SSH_KEY_PATH: "/tmp/fake.pem"
+      DIGITALOCEAN_TOKEN: "fake-do-token"
+      AUTHORIZED_MAIL_USERS: "1"
+      AUTHORIZED_DROPLET_USERS: "1"
+      MAIL_DEFAULT_DOMAIN: "example.com"
+      MAIL_DB_USER: "test"
+      MAIL_DB_PASSWORD: "test"
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.9"
+
+      - run: pip install -r requirements.txt pytest
+
+      - run: pytest tests/ -v
+
+  build-and-push:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: docker/setup-buildx-action@v3
+
+      - uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Extract version from tag
+        id: version
+        run: echo "VERSION=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
+
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          tags: ${{ secrets.DOCKERHUB_USERNAME }}/telegram-admin-bot:${{ steps.version.outputs.VERSION }}
