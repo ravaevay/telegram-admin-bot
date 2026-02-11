@@ -62,6 +62,8 @@ CI/CD: `.github/workflows/ci.yml` — lint + test on push/PR to main; Docker bui
 - `modules/mail.py` — Paramiko SSH to mail server, runs Python scripts inside `onlyoffice-mail-server` Docker container for mailbox creation/password reset
 - `modules/create_test_instance.py` — DigitalOcean REST API calls (create/delete droplets, list SSH keys/images). Droplets created in `fra1` region.
 
+**Stale callback queries:** Telegram callback queries expire after ~30s. All standalone `CallbackQueryHandler`s (extend/delete) wrap `query.answer()` in `try/except BadRequest: pass` to avoid crashes on stale buttons.
+
 **Authorization model:** Two permission groups (`mail`, `droplet`) configured via comma-separated Telegram user IDs in env vars `AUTHORIZED_MAIL_USERS` and `AUTHORIZED_DROPLET_USERS`. Group chat support tracks authorized users in an `allowed_users` set.
 
 ## Environment Variables
