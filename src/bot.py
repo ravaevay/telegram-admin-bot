@@ -3,6 +3,7 @@ import re
 from warnings import filterwarnings
 
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram.error import BadRequest
 from telegram.ext import (
     Application,
     CommandHandler,
@@ -296,7 +297,10 @@ async def handle_extend(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Продление срока инстанса с проверкой владельца."""
     query = update.callback_query
     user_id = query.from_user.id
-    await query.answer()
+    try:
+        await query.answer()
+    except BadRequest:
+        pass
 
     try:
         parts = query.data.split("_")
@@ -328,7 +332,10 @@ async def handle_delete(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Удаление инстанса с проверкой владельца."""
     query = update.callback_query
     user_id = query.from_user.id
-    await query.answer()
+    try:
+        await query.answer()
+    except BadRequest:
+        pass
 
     try:
         droplet_id = int(query.data.removeprefix("delete_"))
