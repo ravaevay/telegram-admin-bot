@@ -20,6 +20,8 @@ AUTHORIZED_GROUPS = {
     "droplet": list(map(int, os.getenv("AUTHORIZED_DROPLET_USERS", "").split(","))),
 }
 
+DB_PATH = os.getenv("DB_PATH", "./instances.db")
+
 MAIL_DEFAULT_DOMAIN = os.getenv("MAIL_DEFAULT_DOMAIN")
 MAIL_DB_USER = os.getenv("MAIL_DB_USER")
 MAIL_DB_PASSWORD = os.getenv("MAIL_DB_PASSWORD")

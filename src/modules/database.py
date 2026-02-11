@@ -2,9 +2,9 @@ import sqlite3
 import logging
 from datetime import datetime, timedelta
 
-logger = logging.getLogger(__name__)
+from config import DB_PATH
 
-DB_PATH = "instances.db"
+logger = logging.getLogger(__name__)
 
 
 def init_db():
