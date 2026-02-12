@@ -61,6 +61,22 @@ def get_instance_by_id(droplet_id):
         return None
 
 
+def get_instances_by_creator(creator_id):
+    """Получить все инстансы, созданные пользователем. Возвращает list[dict]."""
+    try:
+        with sqlite3.connect(DB_PATH) as connection:
+            connection.row_factory = sqlite3.Row
+            cursor = connection.execute(
+                "SELECT droplet_id, name, ip_address, droplet_type, expiration_date, ssh_key_id, creator_id "
+                "FROM instances WHERE creator_id = ? ORDER BY expiration_date",
+                (creator_id,),
+            )
+            return [dict(row) for row in cursor.fetchall()]
+    except sqlite3.Error as e:
+        logger.error(f"Ошибка при получении инстансов пользователя {creator_id}: {e}")
+        return []
+
+
 def get_expiring_instances():
     """Получить инстансы, срок действия которых истекает через 24 часа."""
     try:

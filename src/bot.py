@@ -16,15 +16,17 @@ from telegram.ext import (
 from telegram.warnings import PTBUserWarning
 
 from config import BOT_TOKEN, SSH_CONFIG, DIGITALOCEAN_TOKEN
-from modules.create_test_instance import create_droplet, get_ssh_keys, get_images, delete_droplet
+from modules.create_test_instance import create_droplet, get_ssh_keys, get_images, delete_droplet, DROPLET_TYPES
 from modules.authorization import is_authorized, is_authorized_for_bot
 from modules.database import (
     init_db,
     get_expiring_instances,
     extend_instance_expiration,
     get_instance_by_id,
+    get_instances_by_creator,
 )
 from modules.mail import create_mailbox, generate_password, reset_password
+from modules.notifications import send_notification
 from datetime import datetime
 
 # Suppress PTBUserWarning for CallbackQueryHandler in ConversationHandler
@@ -43,6 +45,7 @@ DROPLET_NAME_RE = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9._-]{0,253}[a-zA-Z0-9]$")
 MAIL_INPUT = 0
 RESET_INPUT = 0
 SELECT_SSH_KEY, SELECT_IMAGE, SELECT_TYPE, SELECT_DURATION, INPUT_NAME = range(5)
+MANAGE_LIST, MANAGE_ACTION, MANAGE_EXTEND, MANAGE_CONFIRM_DELETE = range(100, 104)
 
 # Track users who initiated /start in group chats
 allowed_users = set()
@@ -70,6 +73,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         [InlineKeyboardButton("Создать почтовый ящик", callback_data="create_mailbox")],
         [InlineKeyboardButton("Сброс пароля", callback_data="reset_password")],
         [InlineKeyboardButton("Создать инстанс", callback_data="create_droplet")],
+        [InlineKeyboardButton("Управление инстансами", callback_data="manage_droplets")],
     ]
     reply_markup = InlineKeyboardMarkup(keyboard)
     await update.message.reply_text("Добро пожаловать! Выберите действие:", reply_markup=reply_markup)
@@ -283,6 +287,16 @@ async def droplet_input_name(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
     if result["success"]:
         await update.message.reply_text(result["message"], parse_mode="MarkdownV2")
+        await send_notification(
+            context.bot,
+            action="created",
+            droplet_name=result["droplet_name"],
+            ip_address=result["ip_address"],
+            droplet_type=data["droplet_type"],
+            expiration_date=result["expiration_date"],
+            creator_id=user_id,
+            duration=data["duration"],
+        )
     else:
         await update.message.reply_text(f"Ошибка: {result['message']}")
 
@@ -324,6 +338,16 @@ async def handle_extend(update: Update, context: ContextTypes.DEFAULT_TYPE):
     logger.info(f"extend_instance_expiration result - {result}")
     if result:
         await query.message.reply_text(f"Срок действия инстанса продлён на {days} дней.")
+        await send_notification(
+            context.bot,
+            action="extended",
+            droplet_name=instance["name"],
+            ip_address=instance["ip_address"],
+            droplet_type=instance["droplet_type"],
+            expiration_date=result,
+            creator_id=user_id,
+            duration=days,
+        )
     else:
         await query.message.reply_text("Ошибка при продлении инстанса. Пожалуйста, попробуйте позже.")
 
@@ -357,6 +381,15 @@ async def handle_delete(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if delete_result["success"]:
         await query.message.edit_text("Инстанс был успешно удалён!")
         logger.info(f"Инстанс {droplet_id} был удалён по запросу пользователя {user_id}.")
+        await send_notification(
+            context.bot,
+            action="deleted",
+            droplet_name=instance["name"],
+            ip_address=instance["ip_address"],
+            droplet_type=instance["droplet_type"],
+            expiration_date=instance["expiration_date"],
+            creator_id=user_id,
+        )
     else:
         await query.message.reply_text(f"Ошибка при удалении инстанса: {delete_result['message']}")
 
@@ -383,6 +416,175 @@ async def conversation_timeout(update: Update, context: ContextTypes.DEFAULT_TYP
             "Время ожидания истекло. Операция отменена. Используйте /start для начала."
         )
     return ConversationHandler.END
+
+
+# --- Manage droplets conversation ---
+
+
+async def manage_entry(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Точка входа: показать список инстансов пользователя."""
+    query = update.callback_query
+    user_id = query.from_user.id
+
+    if not _check_group_access(update, user_id):
+        await query.answer("У вас нет доступа к этой кнопке.", show_alert=True)
+        return ConversationHandler.END
+
+    await query.answer()
+
+    if not is_authorized(user_id, "droplet"):
+        await query.message.reply_text("У вас нет прав для управления инстансами.")
+        return ConversationHandler.END
+
+    return await _show_droplet_list(query.message, user_id)
+
+
+async def _show_droplet_list(message, user_id) -> int:
+    """Показать список инстансов пользователя с кнопками управления."""
+    instances = get_instances_by_creator(user_id)
+
+    if not instances:
+        await message.reply_text("У вас нет активных инстансов.")
+        return ConversationHandler.END
+
+    for inst in instances:
+        type_label = DROPLET_TYPES.get(inst["droplet_type"], inst["droplet_type"])
+        text = (
+            f"Имя: {inst['name']}\n"
+            f"IP: {inst['ip_address']}\n"
+            f"Тип: {type_label}\n"
+            f"Срок действия: {inst['expiration_date']}"
+        )
+        keyboard = [
+            [
+                InlineKeyboardButton("Продлить", callback_data=f"my_extend_{inst['droplet_id']}"),
+                InlineKeyboardButton("Удалить", callback_data=f"my_delete_{inst['droplet_id']}"),
+            ]
+        ]
+        await message.reply_text(text, reply_markup=InlineKeyboardMarkup(keyboard))
+
+    return MANAGE_ACTION
+
+
+async def manage_extend_entry(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Выбор срока продления инстанса."""
+    query = update.callback_query
+    await query.answer()
+
+    droplet_id = int(query.data.removeprefix("my_extend_"))
+    context.user_data["manage_droplet_id"] = droplet_id
+
+    keyboard = [
+        [InlineKeyboardButton("3 дня", callback_data="my_ext_days_3")],
+        [InlineKeyboardButton("7 дней", callback_data="my_ext_days_7")],
+    ]
+    await query.message.reply_text("На сколько продлить?", reply_markup=InlineKeyboardMarkup(keyboard))
+    return MANAGE_EXTEND
+
+
+async def manage_extend_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Подтверждение продления инстанса."""
+    query = update.callback_query
+    await query.answer()
+
+    days = int(query.data.removeprefix("my_ext_days_"))
+    droplet_id = context.user_data.get("manage_droplet_id")
+    user_id = query.from_user.id
+
+    instance = get_instance_by_id(droplet_id)
+    if not instance:
+        await query.message.reply_text("Инстанс не найден.")
+        context.user_data.clear()
+        return ConversationHandler.END
+
+    result = extend_instance_expiration(droplet_id, days)
+    if result:
+        await query.message.reply_text(f"Срок действия инстанса продлён на {days} дней.")
+        await send_notification(
+            context.bot,
+            action="extended",
+            droplet_name=instance["name"],
+            ip_address=instance["ip_address"],
+            droplet_type=instance["droplet_type"],
+            expiration_date=result,
+            creator_id=user_id,
+            duration=days,
+        )
+    else:
+        await query.message.reply_text("Ошибка при продлении инстанса.")
+
+    context.user_data.clear()
+    return ConversationHandler.END
+
+
+async def manage_delete_entry(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Запрос подтверждения удаления инстанса."""
+    query = update.callback_query
+    await query.answer()
+
+    droplet_id = int(query.data.removeprefix("my_delete_"))
+    context.user_data["manage_droplet_id"] = droplet_id
+
+    keyboard = [
+        [
+            InlineKeyboardButton("Да, удалить", callback_data=f"my_confirm_delete_{droplet_id}"),
+            InlineKeyboardButton("Отмена", callback_data="my_cancel_delete"),
+        ]
+    ]
+    await query.message.reply_text(
+        "Вы уверены, что хотите удалить этот инстанс?", reply_markup=InlineKeyboardMarkup(keyboard)
+    )
+    return MANAGE_CONFIRM_DELETE
+
+
+async def manage_delete_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Подтверждение удаления инстанса."""
+    query = update.callback_query
+    await query.answer()
+
+    droplet_id = int(query.data.removeprefix("my_confirm_delete_"))
+    user_id = query.from_user.id
+
+    instance = get_instance_by_id(droplet_id)
+    if not instance:
+        await query.message.reply_text("Инстанс не найден.")
+        context.user_data.clear()
+        return ConversationHandler.END
+
+    delete_result = await delete_droplet(DIGITALOCEAN_TOKEN, droplet_id)
+    if delete_result["success"]:
+        await query.message.edit_text("Инстанс был успешно удалён!")
+        await send_notification(
+            context.bot,
+            action="deleted",
+            droplet_name=instance["name"],
+            ip_address=instance["ip_address"],
+            droplet_type=instance["droplet_type"],
+            expiration_date=instance["expiration_date"],
+            creator_id=user_id,
+        )
+    else:
+        await query.message.reply_text(f"Ошибка при удалении: {delete_result['message']}")
+
+    context.user_data.clear()
+    return ConversationHandler.END
+
+
+async def manage_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Отмена удаления."""
+    query = update.callback_query
+    await query.answer()
+    await query.message.reply_text("Удаление отменено.")
+    context.user_data.clear()
+    return ConversationHandler.END
+
+
+async def manage_back(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Возврат к списку инстансов."""
+    query = update.callback_query
+    await query.answer()
+    user_id = query.from_user.id
+    return await _show_droplet_list(query.message, user_id)
 
 
 # --- Background job ---
@@ -436,6 +638,15 @@ async def notify_and_check_instances(context: ContextTypes.DEFAULT_TYPE):
 
                 if delete_result["success"]:
                     logger.info(f"Инстанс '{name}' удалён, так как срок действия истёк.")
+                    await send_notification(
+                        context.bot,
+                        action="auto_deleted",
+                        droplet_name=name,
+                        ip_address=ip_address,
+                        droplet_type=droplet_type,
+                        expiration_date=str(expiration_date),
+                        creator_id=creator_id,
+                    )
                 else:
                     logger.error(f"Ошибка при удалении инстанса '{name}': {delete_result['message']}")
 
@@ -518,11 +729,34 @@ def main():
         per_chat=True,
     )
 
+    # Conversation: manage droplets
+    manage_conv = ConversationHandler(
+        entry_points=[CallbackQueryHandler(manage_entry, pattern=r"^manage_droplets$")],
+        states={
+            MANAGE_ACTION: [
+                CallbackQueryHandler(manage_extend_entry, pattern=r"^my_extend_"),
+                CallbackQueryHandler(manage_delete_entry, pattern=r"^my_delete_"),
+            ],
+            MANAGE_EXTEND: [
+                CallbackQueryHandler(manage_extend_confirm, pattern=r"^my_ext_days_"),
+            ],
+            MANAGE_CONFIRM_DELETE: [
+                CallbackQueryHandler(manage_delete_confirm, pattern=r"^my_confirm_delete_"),
+                CallbackQueryHandler(manage_cancel, pattern=r"^my_cancel_delete$"),
+            ],
+        },
+        fallbacks=[CommandHandler("cancel", cancel)],
+        conversation_timeout=CONVERSATION_TIMEOUT,
+        per_user=True,
+        per_chat=True,
+    )
+
     # Register handlers (order matters — conversations first, then standalone callbacks)
     app.add_handler(CommandHandler("start", start))
     app.add_handler(mail_conv)
     app.add_handler(reset_conv)
     app.add_handler(droplet_conv)
+    app.add_handler(manage_conv)
     app.add_handler(CallbackQueryHandler(handle_extend, pattern=r"^extend_"))
     app.add_handler(CallbackQueryHandler(handle_delete, pattern=r"^delete_"))
 

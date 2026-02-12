@@ -6,6 +6,7 @@ from modules.database import (
     get_instance_by_id,
     delete_instance,
     extend_instance_expiration,
+    get_instances_by_creator,
 )
 
 
@@ -64,3 +65,34 @@ class TestExtendExpiration:
     def test_extend_missing_id(self, tmp_db):
         init_db()
         assert extend_instance_expiration(999, 3) is None
+
+
+class TestGetInstancesByCreator:
+    def test_returns_matching_instances(self, tmp_db):
+        init_db()
+        exp1 = (datetime.now() + timedelta(days=3)).strftime("%Y-%m-%d %H:%M:%S")
+        exp2 = (datetime.now() + timedelta(days=7)).strftime("%Y-%m-%d %H:%M:%S")
+        save_instance(10, "drop-a", "1.1.1.1", "s-2vcpu-2gb", exp1, 1, 42)
+        save_instance(20, "drop-b", "2.2.2.2", "s-2vcpu-4gb", exp2, 1, 42)
+        save_instance(30, "drop-c", "3.3.3.3", "s-2vcpu-2gb", exp1, 1, 99)
+
+        result = get_instances_by_creator(42)
+        assert len(result) == 2
+        assert result[0]["name"] == "drop-a"
+        assert result[1]["name"] == "drop-b"
+
+    def test_returns_empty_list(self, tmp_db):
+        init_db()
+        result = get_instances_by_creator(999)
+        assert result == []
+
+    def test_returns_dicts(self, tmp_db):
+        init_db()
+        exp = (datetime.now() + timedelta(days=1)).strftime("%Y-%m-%d %H:%M:%S")
+        save_instance(50, "d", "0.0.0.0", "s-2vcpu-2gb", exp, 1, 77)
+
+        result = get_instances_by_creator(77)
+        assert len(result) == 1
+        assert isinstance(result[0], dict)
+        assert "droplet_id" in result[0]
+        assert "name" in result[0]
