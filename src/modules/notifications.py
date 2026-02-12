@@ -4,6 +4,8 @@ from config import NOTIFICATION_CHANNEL_ID
 
 logger = logging.getLogger(__name__)
 
+logger.info("NOTIFICATION_CHANNEL_ID = '%s'", NOTIFICATION_CHANNEL_ID)
+
 try:
     from modules.create_test_instance import DROPLET_TYPES
 except Exception:
@@ -15,6 +17,7 @@ async def send_notification(
 ):
     """Send notification to the channel about droplet events."""
     if not NOTIFICATION_CHANNEL_ID:
+        logger.debug("Уведомление пропущено: NOTIFICATION_CHANNEL_ID не задан")
         return
 
     try:
@@ -58,6 +61,7 @@ async def send_notification(
         else:
             text = f"Неизвестное действие: {action} для инстанса {droplet_name}"
 
+        logger.info("Отправка уведомления: %s — %s", action, droplet_name)
         await bot.send_message(chat_id=NOTIFICATION_CHANNEL_ID, text=text)
     except Exception as e:
         logger.error(f"Ошибка отправки уведомления: {e}")
