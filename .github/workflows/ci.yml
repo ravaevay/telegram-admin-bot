@@ -51,7 +51,7 @@ jobs:
       - run: pytest tests/ -v
 
   build-and-push:
-    if: startsWith(github.ref, 'refs/tags/v')
+    if: github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v')
     needs: test
     runs-on: ubuntu-latest
     steps:
@@ -64,14 +64,18 @@ jobs:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
 
-      - name: Extract version from tag
-        id: version
-        run: echo "VERSION=${GITHUB_REF_NAME#v}.${{ github.run_number }}" >> "$GITHUB_OUTPUT"
+      - name: Determine image tags
+        id: tags
+        run: |
+          if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
+            VERSION="${GITHUB_REF_NAME#v}.${{ github.run_number }}"
+            echo "TAGS=${{ secrets.DOCKERHUB_USERNAME }}/telegram-admin-bot:${VERSION},${{ secrets.DOCKERHUB_USERNAME }}/telegram-admin-bot:latest" >> "$GITHUB_OUTPUT"
+          else
+            echo "TAGS=${{ secrets.DOCKERHUB_USERNAME }}/telegram-admin-bot:main-${{ github.sha }},${{ secrets.DOCKERHUB_USERNAME }}/telegram-admin-bot:latest" >> "$GITHUB_OUTPUT"
+          fi
 
       - uses: docker/build-push-action@v6
         with:
           context: .
           push: true
-          tags: |
-            ${{ secrets.DOCKERHUB_USERNAME }}/telegram-admin-bot:${{ steps.version.outputs.VERSION }}
-            ${{ secrets.DOCKERHUB_USERNAME }}/telegram-admin-bot:latest
+          tags: ${{ steps.tags.outputs.TAGS }}
