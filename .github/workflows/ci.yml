@@ -38,6 +38,7 @@ jobs:
       MAIL_DEFAULT_DOMAIN: "example.com"
       MAIL_DB_USER: "test"
       MAIL_DB_PASSWORD: "test"
+      NOTIFICATION_CHANNEL_ID: ""
     steps:
       - uses: actions/checkout@v4
 
@@ -45,7 +46,7 @@ jobs:
         with:
           python-version: "3.9"
 
-      - run: pip install -r requirements.txt pytest
+      - run: pip install -r requirements.txt pytest pytest-asyncio
 
       - run: pytest tests/ -v
 

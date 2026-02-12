@@ -17,6 +17,7 @@ os.environ.setdefault("AUTHORIZED_DROPLET_USERS", "1")
 os.environ.setdefault("MAIL_DEFAULT_DOMAIN", "example.com")
 os.environ.setdefault("MAIL_DB_USER", "test")
 os.environ.setdefault("MAIL_DB_PASSWORD", "test")
+os.environ.setdefault("NOTIFICATION_CHANNEL_ID", "")
 
 # Add src/ to sys.path so test imports work
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
