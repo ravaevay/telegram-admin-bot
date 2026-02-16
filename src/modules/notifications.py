@@ -13,7 +13,17 @@ except Exception:
 
 
 async def send_notification(
-    bot, action, droplet_name, ip_address, droplet_type, expiration_date, creator_id, duration=None
+    bot,
+    action,
+    droplet_name,
+    ip_address,
+    droplet_type,
+    expiration_date,
+    creator_id,
+    duration=None,
+    creator_username=None,
+    domain_name=None,
+    price_monthly=None,
 ):
     """Send notification to the channel about droplet events."""
     if not NOTIFICATION_CHANNEL_ID:
@@ -21,16 +31,21 @@ async def send_notification(
         return
 
     try:
+        display_name = creator_username or str(creator_id)
         type_label = DROPLET_TYPES.get(droplet_type, droplet_type)
 
         if action == "created":
+            dns_line = f"DNS: {domain_name}\n" if domain_name else ""
+            cost_line = f"Стоимость: ~${price_monthly}/мес\n" if price_monthly else ""
             text = (
                 f"Новый инстанс создан\n\n"
                 f"Имя: {droplet_name}\n"
                 f"IP: {ip_address}\n"
+                f"{dns_line}"
                 f"Тип: {type_label}\n"
+                f"{cost_line}"
                 f"Срок действия: {expiration_date}\n"
-                f"Создатель: {creator_id}"
+                f"Создатель: {display_name}"
             )
         elif action == "extended":
             duration_text = f"\nПродлён на: {duration} дн." if duration else ""
@@ -40,7 +55,7 @@ async def send_notification(
                 f"IP: {ip_address}\n"
                 f"Тип: {type_label}\n"
                 f"Новый срок: {expiration_date}{duration_text}\n"
-                f"Пользователь: {creator_id}"
+                f"Пользователь: {display_name}"
             )
         elif action == "deleted":
             text = (
@@ -48,7 +63,7 @@ async def send_notification(
                 f"Имя: {droplet_name}\n"
                 f"IP: {ip_address}\n"
                 f"Тип: {type_label}\n"
-                f"Пользователь: {creator_id}"
+                f"Пользователь: {display_name}"
             )
         elif action == "auto_deleted":
             text = (
@@ -56,7 +71,7 @@ async def send_notification(
                 f"Имя: {droplet_name}\n"
                 f"IP: {ip_address}\n"
                 f"Тип: {type_label}\n"
-                f"Создатель: {creator_id}"
+                f"Создатель: {display_name}"
             )
         else:
             text = f"Неизвестное действие: {action} для инстанса {droplet_name}"

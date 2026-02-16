@@ -7,6 +7,8 @@ from modules.database import (
     delete_instance,
     extend_instance_expiration,
     get_instances_by_creator,
+    get_expiring_instances,
+    update_instance_dns,
 )
 
 
@@ -35,6 +37,24 @@ class TestSaveAndGet:
     def test_get_missing(self, tmp_db):
         init_db()
         assert get_instance_by_id(999) is None
+
+    def test_save_with_creator_username(self, tmp_db):
+        init_db()
+        exp = (datetime.now() + timedelta(days=7)).strftime("%Y-%m-%d %H:%M:%S")
+        save_instance(124, "test-drop", "1.2.3.4", "s-2vcpu-2gb", exp, 456, 789, creator_username="@testuser")
+
+        instance = get_instance_by_id(124)
+        assert instance is not None
+        assert instance["creator_username"] == "@testuser"
+
+    def test_save_without_creator_username(self, tmp_db):
+        init_db()
+        exp = (datetime.now() + timedelta(days=7)).strftime("%Y-%m-%d %H:%M:%S")
+        save_instance(125, "test-drop", "1.2.3.4", "s-2vcpu-2gb", exp, 456, 789)
+
+        instance = get_instance_by_id(125)
+        assert instance is not None
+        assert instance["creator_username"] is None
 
 
 class TestDeleteInstance:
@@ -96,3 +116,51 @@ class TestGetInstancesByCreator:
         assert isinstance(result[0], dict)
         assert "droplet_id" in result[0]
         assert "name" in result[0]
+
+
+class TestGetExpiringInstances:
+    def test_returns_dicts(self, tmp_db):
+        init_db()
+        # Instance expiring soon (within 24h)
+        exp = (datetime.now() + timedelta(hours=12)).strftime("%Y-%m-%d %H:%M:%S")
+        save_instance(300, "expiring", "1.1.1.1", "s-2vcpu-2gb", exp, 1, 42, creator_username="@user")
+
+        result = get_expiring_instances()
+        assert len(result) == 1
+        assert isinstance(result[0], dict)
+        assert result[0]["droplet_id"] == 300
+        assert result[0]["name"] == "expiring"
+        assert result[0]["creator_username"] == "@user"
+
+    def test_includes_dns_columns(self, tmp_db):
+        init_db()
+        exp = (datetime.now() + timedelta(hours=6)).strftime("%Y-%m-%d %H:%M:%S")
+        save_instance(301, "dns-test", "2.2.2.2", "s-2vcpu-2gb", exp, 1, 42)
+        update_instance_dns(301, "test.example.com", 12345, "example.com")
+
+        result = get_expiring_instances()
+        assert len(result) == 1
+        assert result[0]["domain_name"] == "test.example.com"
+        assert result[0]["dns_record_id"] == 12345
+        assert result[0]["dns_zone"] == "example.com"
+
+
+class TestUpdateInstanceDns:
+    def test_updates_dns_info(self, tmp_db):
+        init_db()
+        exp = (datetime.now() + timedelta(days=7)).strftime("%Y-%m-%d %H:%M:%S")
+        save_instance(400, "dns-drop", "1.2.3.4", "s-2vcpu-2gb", exp, 1, 42)
+
+        result = update_instance_dns(400, "sub.example.com", 99999, "example.com")
+        assert result is True
+
+        instance = get_instance_by_id(400)
+        assert instance["domain_name"] == "sub.example.com"
+        assert instance["dns_record_id"] == 99999
+        assert instance["dns_zone"] == "example.com"
+
+    def test_update_nonexistent_instance(self, tmp_db):
+        init_db()
+        # Should still return True (UPDATE succeeds with 0 rows affected)
+        result = update_instance_dns(999, "sub.example.com", 99999, "example.com")
+        assert result is True

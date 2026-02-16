@@ -1,6 +1,7 @@
 import asyncio
 import logging
 import re
+import time
 
 import httpx
 
@@ -20,6 +21,9 @@ DROPLET_TYPES = {
 
 IP_POLL_ATTEMPTS = 10
 IP_POLL_INTERVAL = 5  # seconds
+
+_size_cache = {"data": None, "timestamp": 0}
+_SIZE_CACHE_TTL = 3600
 
 _MD_ESCAPE_RE = re.compile(r"([_*\[\]()~`>#+\-=|{}.!\\])")
 
@@ -66,7 +70,87 @@ async def get_images(token):
         return {"success": False, "message": str(e)}
 
 
-async def create_droplet(token, name, ssh_key_id, droplet_type, image, duration, creator_id):
+async def get_domains(token):
+    """Получить список доменов из DigitalOcean."""
+    try:
+        async with httpx.AsyncClient(headers=_auth_headers(token)) as client:
+            response = await client.get(BASE_URL + "domains")
+            response.raise_for_status()
+
+        domains = [d["name"] for d in response.json().get("domains", [])]
+        return {"success": True, "domains": domains}
+    except httpx.HTTPError as e:
+        logger.error(f"Ошибка при получении доменов: {e}")
+        return {"success": False, "message": str(e)}
+
+
+async def create_dns_record(token, domain, subdomain, ip_address):
+    """Создаёт A-запись DNS в DigitalOcean."""
+    try:
+        payload = {
+            "type": "A",
+            "name": subdomain,
+            "data": ip_address,
+            "ttl": 3600,
+        }
+        headers = {**_auth_headers(token), "Content-Type": "application/json"}
+
+        async with httpx.AsyncClient(headers=headers) as client:
+            response = await client.post(BASE_URL + f"domains/{domain}/records", json=payload)
+            response.raise_for_status()
+
+        record = response.json().get("domain_record", {})
+        record_id = record.get("id")
+        fqdn = f"{subdomain}.{domain}"
+        return {"success": True, "record_id": record_id, "fqdn": fqdn}
+    except httpx.HTTPError as e:
+        logger.error(f"Ошибка при создании DNS-записи: {e}")
+        return {"success": False, "message": str(e)}
+
+
+async def delete_dns_record(token, domain, record_id):
+    """Удаляет DNS-запись из DigitalOcean."""
+    try:
+        async with httpx.AsyncClient(headers=_auth_headers(token)) as client:
+            response = await client.delete(BASE_URL + f"domains/{domain}/records/{record_id}")
+            response.raise_for_status()
+
+        return {"success": True}
+    except httpx.HTTPError as e:
+        logger.error(f"Ошибка при удалении DNS-записи {record_id}: {e}")
+        return {"success": False, "message": str(e)}
+
+
+async def get_sizes(token):
+    """Получить список размеров Droplet из DigitalOcean (с кэшированием)."""
+    global _size_cache
+
+    if _size_cache["data"] is not None and (time.time() - _size_cache["timestamp"]) < _SIZE_CACHE_TTL:
+        return _size_cache["data"]
+
+    try:
+        async with httpx.AsyncClient(headers=_auth_headers(token)) as client:
+            response = await client.get(BASE_URL + "sizes?per_page=200")
+            response.raise_for_status()
+
+        sizes = {}
+        for s in response.json().get("sizes", []):
+            sizes[s["slug"]] = {
+                "price_monthly": s["price_monthly"],
+                "price_hourly": s["price_hourly"],
+            }
+
+        _size_cache["data"] = sizes
+        _size_cache["timestamp"] = time.time()
+        return sizes
+    except httpx.HTTPError as e:
+        logger.error(f"Ошибка при получении размеров: {e}")
+        return {}
+
+
+async def create_droplet(
+    token, name, ssh_key_id, droplet_type, image, duration, creator_id, creator_username=None, price_monthly=None
+):
     """Создаёт Droplet в DigitalOcean."""
     try:
         expiration_date = (datetime.now() + timedelta(days=duration)).strftime("%Y-%m-%d %H:%M:%S")
@@ -107,7 +191,9 @@ async def create_droplet(token, name, ssh_key_id, droplet_type, image, duration,
             ip_address = "Не удалось получить IP-адрес"
 
         # Сохраняем данные в БД
-        save_instance(droplet_id, name, ip_address, droplet_type, expiration_date, ssh_key_id, creator_id)
+        save_instance(
+            droplet_id, name, ip_address, droplet_type, expiration_date, ssh_key_id, creator_id, creator_username
+        )
         logger.info(f"Инстанс {name} создан. ID: {droplet_id}, IP: {ip_address}, срок действия до {expiration_date}")
 
         droplet_type_label = DROPLET_TYPES.get(droplet_type, droplet_type)
@@ -118,9 +204,12 @@ async def create_droplet(token, name, ssh_key_id, droplet_type, image, duration,
             f"Type: `{_escape_md(droplet_type_label)}`\n"
             f"Expires: `{_escape_md(expiration_date)}`"
         )
+        if price_monthly is not None:
+            msg += f"\nCost: ~${_escape_md(str(price_monthly))}/month"
 
         return {
             "success": True,
+            "droplet_id": droplet_id,
             "droplet_name": droplet_name,
             "ip_address": ip_address,
             "expiration_date": expiration_date,
@@ -132,9 +221,17 @@ async def create_droplet(token, name, ssh_key_id, droplet_type, image, duration,
         return {"success": False, "message": str(e)}
 
 
-async def delete_droplet(token, droplet_id):
+async def delete_droplet(token, droplet_id, dns_zone=None, dns_record_id=None):
     """Удаляет Droplet из DigitalOcean и запись из базы данных."""
     try:
+        # Удаление DNS-записи (если указана)
+        if dns_zone and dns_record_id:
+            dns_result = await delete_dns_record(token, dns_zone, dns_record_id)
+            if not dns_result["success"]:
+                logger.warning(
+                    f"Не удалось удалить DNS-запись {dns_record_id} для зоны {dns_zone}: {dns_result.get('message')}"
+                )
+
         async with httpx.AsyncClient(headers=_auth_headers(token)) as client:
             response = await client.delete(f"{BASE_URL}droplets/{droplet_id}")
             response.raise_for_status()

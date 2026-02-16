@@ -16,7 +16,16 @@ from telegram.ext import (
 from telegram.warnings import PTBUserWarning
 
 from config import BOT_TOKEN, SSH_CONFIG, DIGITALOCEAN_TOKEN
-from modules.create_test_instance import create_droplet, get_ssh_keys, get_images, delete_droplet, DROPLET_TYPES
+from modules.create_test_instance import (
+    create_droplet,
+    get_ssh_keys,
+    get_images,
+    get_domains,
+    get_sizes,
+    create_dns_record,
+    delete_droplet,
+    DROPLET_TYPES,
+)
 from modules.authorization import is_authorized, is_authorized_for_bot
 from modules.database import (
     init_db,
@@ -24,6 +33,7 @@ from modules.database import (
     extend_instance_expiration,
     get_instance_by_id,
     get_instances_by_creator,
+    update_instance_dns,
 )
 from modules.mail import create_mailbox, generate_password, reset_password
 from modules.notifications import send_notification
@@ -40,11 +50,12 @@ NOTIFY_INTERVAL_SECONDS = 43200  # 12 hours
 CONVERSATION_TIMEOUT = 600  # 10 minutes
 
 DROPLET_NAME_RE = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9._-]{0,253}[a-zA-Z0-9]$")
+SUBDOMAIN_RE = re.compile(r"^[a-zA-Z0-9]([a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?$")
 
 # ConversationHandler states
 MAIL_INPUT = 0
 RESET_INPUT = 0
-SELECT_SSH_KEY, SELECT_IMAGE, SELECT_TYPE, SELECT_DURATION, INPUT_NAME = range(5)
+SELECT_SSH_KEY, SELECT_IMAGE, SELECT_DNS_ZONE, INPUT_SUBDOMAIN, SELECT_TYPE, SELECT_DURATION, INPUT_NAME = range(7)
 MANAGE_LIST, MANAGE_ACTION, MANAGE_EXTEND, MANAGE_CONFIRM_DELETE = range(100, 104)
 
 # Track users who initiated /start in group chats
@@ -211,21 +222,74 @@ async def droplet_select_ssh_key(update: Update, context: ContextTypes.DEFAULT_T
 
 
 async def droplet_select_image(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    """Выбор образа — переход к выбору типа дроплета."""
+    """Выбор образа — переход к выбору DNS-зоны."""
     query = update.callback_query
     await query.answer()
 
     image_id = query.data.removeprefix("image_")
     context.user_data["image"] = image_id
 
-    keyboard = [
-        [InlineKeyboardButton("2GB-2vCPU-60GB", callback_data="droplet_type_s-2vcpu-2gb")],
-        [InlineKeyboardButton("4GB-2vCPU-80GB", callback_data="droplet_type_s-2vcpu-4gb")],
-        [InlineKeyboardButton("8GB-4vCPU-160GB", callback_data="droplet_type_s-4vcpu-8gb")],
-        [InlineKeyboardButton("16GB-8vCPU-320GB", callback_data="droplet_type_s-8vcpu-16gb")],
-    ]
+    # Попытка получить список доменов для DNS
+    result = await get_domains(DIGITALOCEAN_TOKEN)
+    if result["success"] and result["domains"]:
+        keyboard = [[InlineKeyboardButton(domain, callback_data=f"dns_zone_{domain}")] for domain in result["domains"]]
+        keyboard.append([InlineKeyboardButton("Пропустить (без DNS)", callback_data="dns_zone_skip")])
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        await query.message.reply_text("Выберите DNS-зону для создания записи:", reply_markup=reply_markup)
+        return SELECT_DNS_ZONE
+
+    # Нет доменов или ошибка — пропускаем DNS, переходим к выбору типа
+    context.user_data["dns_zone"] = None
+    context.user_data["subdomain"] = None
+    return await _show_droplet_type_keyboard(query.message)
+
+
+async def droplet_select_dns_zone(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Выбор DNS-зоны — переход к вводу субдомена или выбору типа."""
+    query = update.callback_query
+    await query.answer()
+
+    zone = query.data.removeprefix("dns_zone_")
+    if zone == "skip":
+        context.user_data["dns_zone"] = None
+        context.user_data["subdomain"] = None
+        return await _show_droplet_type_keyboard(query.message)
+
+    context.user_data["dns_zone"] = zone
+    await query.message.reply_text(f"Введите имя субдомена для зоны {zone}:")
+    return INPUT_SUBDOMAIN
+
+
+async def droplet_input_subdomain(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Получение субдомена — переход к выбору типа дроплета."""
+    subdomain = update.message.text.strip().lower()
+
+    if not SUBDOMAIN_RE.match(subdomain):
+        await update.message.reply_text(
+            "Недопустимое имя субдомена. Используйте латинские буквы, цифры и дефис "
+            "(1-63 символа, начинается и заканчивается буквой или цифрой).\nПопробуйте ещё раз:"
+        )
+        return INPUT_SUBDOMAIN
+
+    context.user_data["subdomain"] = subdomain
+    return await _show_droplet_type_keyboard(update.message)
+
+
+async def _show_droplet_type_keyboard(message) -> int:
+    """Показать клавиатуру выбора типа дроплета с ценами."""
+    sizes = await get_sizes(DIGITALOCEAN_TOKEN)
+
+    keyboard = []
+    for slug, label in DROPLET_TYPES.items():
+        price_info = sizes.get(slug)
+        if price_info:
+            btn_text = f"{label} — ${price_info['price_monthly']}/мес"
+        else:
+            btn_text = label
+        keyboard.append([InlineKeyboardButton(btn_text, callback_data=f"droplet_type_{slug}")])
+
     reply_markup = InlineKeyboardMarkup(keyboard)
-    await query.message.reply_text("Выберите тип Droplet:", reply_markup=reply_markup)
+    await message.reply_text("Выберите тип Droplet:", reply_markup=reply_markup)
     return SELECT_TYPE
 
 
@@ -237,13 +301,35 @@ async def droplet_select_type(update: Update, context: ContextTypes.DEFAULT_TYPE
     droplet_type = query.data.removeprefix("droplet_type_")
     context.user_data["droplet_type"] = droplet_type
 
-    keyboard = [
-        [InlineKeyboardButton("1 день", callback_data="duration_1")],
-        [InlineKeyboardButton("3 дня", callback_data="duration_3")],
-        [InlineKeyboardButton("Неделя", callback_data="duration_7")],
-        [InlineKeyboardButton("2 недели", callback_data="duration_14")],
-        [InlineKeyboardButton("Месяц", callback_data="duration_30")],
-    ]
+    # Получаем цены для расчёта стоимости по длительности
+    sizes = await get_sizes(DIGITALOCEAN_TOKEN)
+    price_info = sizes.get(droplet_type)
+    if price_info:
+        context.user_data["price_monthly"] = price_info["price_monthly"]
+        context.user_data["price_hourly"] = price_info["price_hourly"]
+        hourly = price_info["price_hourly"]
+        durations = [
+            ("1 день", 1),
+            ("3 дня", 3),
+            ("Неделя", 7),
+            ("2 недели", 14),
+            ("Месяц", 30),
+        ]
+        keyboard = [
+            [InlineKeyboardButton(f"{label} — ~${hourly * 24 * days:.2f}", callback_data=f"duration_{days}")]
+            for label, days in durations
+        ]
+    else:
+        context.user_data["price_monthly"] = None
+        context.user_data["price_hourly"] = None
+        keyboard = [
+            [InlineKeyboardButton("1 день", callback_data="duration_1")],
+            [InlineKeyboardButton("3 дня", callback_data="duration_3")],
+            [InlineKeyboardButton("Неделя", callback_data="duration_7")],
+            [InlineKeyboardButton("2 недели", callback_data="duration_14")],
+            [InlineKeyboardButton("Месяц", callback_data="duration_30")],
+        ]
+
     reply_markup = InlineKeyboardMarkup(keyboard)
     await query.message.reply_text("Выберите длительность аренды инстанса:", reply_markup=reply_markup)
     return SELECT_DURATION
@@ -272,7 +358,9 @@ async def droplet_input_name(update: Update, context: ContextTypes.DEFAULT_TYPE)
         )
         return INPUT_NAME
 
-    user_id = update.effective_user.id
+    user = update.effective_user
+    user_id = user.id
+    creator_username = f"@{user.username}" if user.username else user.first_name
     data = context.user_data
 
     result = await create_droplet(
@@ -283,9 +371,32 @@ async def droplet_input_name(update: Update, context: ContextTypes.DEFAULT_TYPE)
         data["image"],
         data["duration"],
         creator_id=user_id,
+        creator_username=creator_username,
+        price_monthly=data.get("price_monthly"),
     )
 
+    domain_name = None
     if result["success"]:
+        # Создание DNS-записи (если указаны зона и субдомен)
+        dns_zone = data.get("dns_zone")
+        subdomain = data.get("subdomain")
+        if dns_zone and subdomain:
+            dns_result = await create_dns_record(DIGITALOCEAN_TOKEN, dns_zone, subdomain, result["ip_address"])
+            if dns_result["success"]:
+                domain_name = dns_result["fqdn"]
+                update_instance_dns(
+                    result["droplet_id"],
+                    domain_name,
+                    dns_result["record_id"],
+                    dns_zone,
+                )
+                # Дополняем сообщение информацией о DNS
+                result["message"] += f"\nDNS: `{domain_name}`"
+            else:
+                await update.message.reply_text(
+                    f"Инстанс создан, но DNS-запись не удалось создать: {dns_result['message']}"
+                )
+
         await update.message.reply_text(result["message"], parse_mode="MarkdownV2")
         await send_notification(
             context.bot,
@@ -296,6 +407,9 @@ async def droplet_input_name(update: Update, context: ContextTypes.DEFAULT_TYPE)
             expiration_date=result["expiration_date"],
             creator_id=user_id,
             duration=data["duration"],
+            creator_username=creator_username,
+            domain_name=domain_name,
+            price_monthly=data.get("price_monthly"),
         )
     else:
         await update.message.reply_text(f"Ошибка: {result['message']}")
@@ -347,6 +461,7 @@ async def handle_extend(update: Update, context: ContextTypes.DEFAULT_TYPE):
             expiration_date=result,
             creator_id=user_id,
             duration=days,
+            creator_username=instance.get("creator_username"),
         )
     else:
         await query.message.reply_text("Ошибка при продлении инстанса. Пожалуйста, попробуйте позже.")
@@ -377,7 +492,12 @@ async def handle_delete(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.message.reply_text("У вас нет прав для удаления этого инстанса.")
         return
 
-    delete_result = await delete_droplet(DIGITALOCEAN_TOKEN, droplet_id)
+    delete_result = await delete_droplet(
+        DIGITALOCEAN_TOKEN,
+        droplet_id,
+        dns_zone=instance.get("dns_zone"),
+        dns_record_id=instance.get("dns_record_id"),
+    )
     if delete_result["success"]:
         await query.message.edit_text("Инстанс был успешно удалён!")
         logger.info(f"Инстанс {droplet_id} был удалён по запросу пользователя {user_id}.")
@@ -389,6 +509,7 @@ async def handle_delete(update: Update, context: ContextTypes.DEFAULT_TYPE):
             droplet_type=instance["droplet_type"],
             expiration_date=instance["expiration_date"],
             creator_id=user_id,
+            creator_username=instance.get("creator_username"),
         )
     else:
         await query.message.reply_text(f"Ошибка при удалении инстанса: {delete_result['message']}")
@@ -449,9 +570,11 @@ async def _show_droplet_list(message, user_id) -> int:
 
     for inst in instances:
         type_label = DROPLET_TYPES.get(inst["droplet_type"], inst["droplet_type"])
+        dns_line = f"DNS: {inst['domain_name']}\n" if inst.get("domain_name") else ""
         text = (
             f"Имя: {inst['name']}\n"
             f"IP: {inst['ip_address']}\n"
+            f"{dns_line}"
             f"Тип: {type_label}\n"
             f"Срок действия: {inst['expiration_date']}"
         )
@@ -509,6 +632,7 @@ async def manage_extend_confirm(update: Update, context: ContextTypes.DEFAULT_TY
             expiration_date=result,
             creator_id=user_id,
             duration=days,
+            creator_username=instance.get("creator_username"),
         )
     else:
         await query.message.reply_text("Ошибка при продлении инстанса.")
@@ -551,7 +675,12 @@ async def manage_delete_confirm(update: Update, context: ContextTypes.DEFAULT_TY
         context.user_data.clear()
         return ConversationHandler.END
 
-    delete_result = await delete_droplet(DIGITALOCEAN_TOKEN, droplet_id)
+    delete_result = await delete_droplet(
+        DIGITALOCEAN_TOKEN,
+        droplet_id,
+        dns_zone=instance.get("dns_zone"),
+        dns_record_id=instance.get("dns_record_id"),
+    )
     if delete_result["success"]:
         await query.message.edit_text("Инстанс был успешно удалён!")
         await send_notification(
@@ -562,6 +691,7 @@ async def manage_delete_confirm(update: Update, context: ContextTypes.DEFAULT_TY
             droplet_type=instance["droplet_type"],
             expiration_date=instance["expiration_date"],
             creator_id=user_id,
+            creator_username=instance.get("creator_username"),
         )
     else:
         await query.message.reply_text(f"Ошибка при удалении: {delete_result['message']}")
@@ -596,7 +726,13 @@ async def notify_and_check_instances(context: ContextTypes.DEFAULT_TYPE):
 
     for instance in expiring_instances:
         try:
-            droplet_id, name, ip_address, droplet_type, expiration_date, ssh_key_id, creator_id = instance
+            droplet_id = instance["droplet_id"]
+            name = instance["name"]
+            ip_address = instance["ip_address"]
+            droplet_type = instance["droplet_type"]
+            expiration_date = instance["expiration_date"]
+            creator_id = instance["creator_id"]
+            creator_username = instance.get("creator_username")
 
             logger.debug(f"expiration_date из БД: {expiration_date} (тип: {type(expiration_date)})")
 
@@ -634,7 +770,12 @@ async def notify_and_check_instances(context: ContextTypes.DEFAULT_TYPE):
 
             elif time_left <= 0:
                 logger.info(f"Инстанс '{name}' с ID {droplet_id} должен быть удалён. Запускаем удаление...")
-                delete_result = await delete_droplet(DIGITALOCEAN_TOKEN, droplet_id)
+                delete_result = await delete_droplet(
+                    DIGITALOCEAN_TOKEN,
+                    droplet_id,
+                    dns_zone=instance.get("dns_zone"),
+                    dns_record_id=instance.get("dns_record_id"),
+                )
 
                 if delete_result["success"]:
                     logger.info(f"Инстанс '{name}' удалён, так как срок действия истёк.")
@@ -646,6 +787,7 @@ async def notify_and_check_instances(context: ContextTypes.DEFAULT_TYPE):
                         droplet_type=droplet_type,
                         expiration_date=str(expiration_date),
                         creator_id=creator_id,
+                        creator_username=creator_username,
                     )
                 else:
                     logger.error(f"Ошибка при удалении инстанса '{name}': {delete_result['message']}")
@@ -719,6 +861,8 @@ def main():
         states={
             SELECT_SSH_KEY: [CallbackQueryHandler(droplet_select_ssh_key, pattern=r"^ssh_key_")],
             SELECT_IMAGE: [CallbackQueryHandler(droplet_select_image, pattern=r"^image_")],
+            SELECT_DNS_ZONE: [CallbackQueryHandler(droplet_select_dns_zone, pattern=r"^dns_zone_")],
+            INPUT_SUBDOMAIN: [MessageHandler(filters.TEXT & ~filters.COMMAND, droplet_input_subdomain)],
             SELECT_TYPE: [CallbackQueryHandler(droplet_select_type, pattern=r"^droplet_type_")],
             SELECT_DURATION: [CallbackQueryHandler(droplet_select_duration, pattern=r"^duration_")],
             INPUT_NAME: [MessageHandler(filters.TEXT & ~filters.COMMAND, droplet_input_name)],
