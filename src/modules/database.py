@@ -7,6 +7,15 @@ from config import DB_PATH
 logger = logging.getLogger(__name__)
 
 
+def _migrate_add_column(conn, col, col_type):
+    """Добавляет колонку в таблицу instances, если она ещё не существует."""
+    try:
+        conn.execute(f"ALTER TABLE instances ADD COLUMN {col} {col_type}")
+        logger.info(f"Колонка {col} добавлена в таблицу instances.")
+    except sqlite3.OperationalError:
+        pass  # колонка уже существует
+
+
 def init_db():
     """Инициализация базы данных."""
     with sqlite3.connect(DB_PATH) as connection:
@@ -22,19 +31,27 @@ def init_db():
         )
         """)
         connection.commit()
+
+        _migrate_add_column(connection, "creator_username", "TEXT")
+        _migrate_add_column(connection, "domain_name", "TEXT")
+        _migrate_add_column(connection, "dns_record_id", "INTEGER")
+        _migrate_add_column(connection, "dns_zone", "TEXT")
+
     logger.info("База данных инициализирована.")
 
 
-def save_instance(droplet_id, name, ip_address, droplet_type, expiration_date, ssh_key_id, creator_id):
+def save_instance(
+    droplet_id, name, ip_address, droplet_type, expiration_date, ssh_key_id, creator_id, creator_username=None
+):
     """Сохранение информации об инстансе в базу данных."""
     try:
         with sqlite3.connect(DB_PATH) as connection:
             connection.execute(
                 """
-            INSERT INTO instances (droplet_id, name, ip_address, droplet_type, expiration_date, ssh_key_id, creator_id)
-            VALUES (?, ?, ?, ?, ?, ?, ?)
+            INSERT INTO instances (droplet_id, name, ip_address, droplet_type, expiration_date, ssh_key_id, creator_id, creator_username)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
             """,
-                (droplet_id, name, ip_address, droplet_type, expiration_date, ssh_key_id, creator_id),
+                (droplet_id, name, ip_address, droplet_type, expiration_date, ssh_key_id, creator_id, creator_username),
             )
             connection.commit()
         logger.info(f"Инстанс {name} (ID: {droplet_id}) сохранён в базе данных.")
@@ -48,7 +65,8 @@ def get_instance_by_id(droplet_id):
         with sqlite3.connect(DB_PATH) as connection:
             connection.row_factory = sqlite3.Row
             cursor = connection.execute(
-                "SELECT droplet_id, name, ip_address, droplet_type, expiration_date, ssh_key_id, creator_id "
+                "SELECT droplet_id, name, ip_address, droplet_type, expiration_date, ssh_key_id, creator_id, "
+                "creator_username, domain_name, dns_record_id, dns_zone "
                 "FROM instances WHERE droplet_id = ?",
                 (droplet_id,),
             )
@@ -67,7 +85,8 @@ def get_instances_by_creator(creator_id):
         with sqlite3.connect(DB_PATH) as connection:
             connection.row_factory = sqlite3.Row
             cursor = connection.execute(
-                "SELECT droplet_id, name, ip_address, droplet_type, expiration_date, ssh_key_id, creator_id "
+                "SELECT droplet_id, name, ip_address, droplet_type, expiration_date, ssh_key_id, creator_id, "
+                "creator_username, domain_name, dns_record_id, dns_zone "
                 "FROM instances WHERE creator_id = ? ORDER BY expiration_date",
                 (creator_id,),
             )
@@ -78,15 +97,17 @@ def get_instances_by_creator(creator_id):
 
 
 def get_expiring_instances():
-    """Получить инстансы, срок действия которых истекает через 24 часа."""
+    """Получить инстансы, срок действия которых истекает через 24 часа. Возвращает list[dict]."""
     try:
         with sqlite3.connect(DB_PATH) as connection:
+            connection.row_factory = sqlite3.Row
             cursor = connection.execute("""
-            SELECT droplet_id, name, ip_address, droplet_type, expiration_date, ssh_key_id, creator_id
+            SELECT droplet_id, name, ip_address, droplet_type, expiration_date, ssh_key_id, creator_id,
+                   creator_username, domain_name, dns_record_id, dns_zone
             FROM instances
             WHERE expiration_date <= datetime('now', 'localtime', '+1 day')
             """)
-            return cursor.fetchall()
+            return [dict(row) for row in cursor.fetchall()]
     except sqlite3.Error as e:
         logger.error(f"Ошибка при получении списка инстансов с истекающим сроком действия: {e}")
         return []
@@ -135,4 +156,20 @@ def delete_instance(droplet_id):
                 return False
     except sqlite3.Error as e:
         logger.error(f"Ошибка при удалении инстанса ID {droplet_id} из базы данных: {e}")
+        return False
+
+
+def update_instance_dns(droplet_id, domain_name, dns_record_id, dns_zone):
+    """Обновляет DNS-информацию инстанса в базе данных."""
+    try:
+        with sqlite3.connect(DB_PATH) as connection:
+            connection.execute(
+                "UPDATE instances SET domain_name = ?, dns_record_id = ?, dns_zone = ? WHERE droplet_id = ?",
+                (domain_name, dns_record_id, dns_zone, droplet_id),
+            )
+            connection.commit()
+        logger.info(f"DNS-информация инстанса ID {droplet_id} обновлена: {domain_name} (зона {dns_zone}).")
+        return True
+    except sqlite3.Error as e:
+        logger.error(f"Ошибка при обновлении DNS-информации инстанса ID {droplet_id}: {e}")
         return False
