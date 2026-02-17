@@ -18,12 +18,14 @@ from telegram.warnings import PTBUserWarning
 from config import BOT_TOKEN, SSH_CONFIG, DIGITALOCEAN_TOKEN
 from modules.create_test_instance import (
     create_droplet,
+    create_snapshot,
     get_ssh_keys,
     get_images,
     get_domains,
     get_sizes,
     create_dns_record,
     delete_droplet,
+    wait_for_action,
     DROPLET_TYPES,
 )
 from modules.authorization import is_authorized, is_authorized_for_bot
@@ -336,12 +338,19 @@ async def droplet_select_type(update: Update, context: ContextTypes.DEFAULT_TYPE
 
 
 async def droplet_select_duration(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    """Выбор длительности — запрос имени инстанса."""
+    """Выбор длительности — запрос имени инстанса или создание с FQDN."""
     query = update.callback_query
     await query.answer()
 
     duration = int(query.data.removeprefix("duration_"))
     context.user_data["duration"] = duration
+
+    # Если выбран DNS, используем FQDN как имя дроплета
+    dns_zone = context.user_data.get("dns_zone")
+    subdomain = context.user_data.get("subdomain")
+    if dns_zone and subdomain:
+        droplet_name = f"{subdomain}.{dns_zone}"
+        return await _create_droplet_and_respond(query.message, query.from_user, context, droplet_name)
 
     await query.message.reply_text("Введите имя инстанса:")
     return INPUT_NAME
@@ -358,9 +367,14 @@ async def droplet_input_name(update: Update, context: ContextTypes.DEFAULT_TYPE)
         )
         return INPUT_NAME
 
-    user = update.effective_user
+    return await _create_droplet_and_respond(update.message, update.effective_user, context, droplet_name)
+
+
+async def _create_droplet_and_respond(message, user, context, droplet_name) -> int:
+    """Общая логика создания дроплета, DNS-записи и отправки уведомления."""
     user_id = user.id
     creator_username = f"@{user.username}" if user.username else user.first_name
+    creator_tag = user.username or user.first_name
     data = context.user_data
 
     result = await create_droplet(
@@ -373,6 +387,8 @@ async def droplet_input_name(update: Update, context: ContextTypes.DEFAULT_TYPE)
         creator_id=user_id,
         creator_username=creator_username,
         price_monthly=data.get("price_monthly"),
+        creator_tag=creator_tag,
+        price_hourly=data.get("price_hourly"),
     )
 
     domain_name = None
@@ -393,11 +409,9 @@ async def droplet_input_name(update: Update, context: ContextTypes.DEFAULT_TYPE)
                 # Дополняем сообщение информацией о DNS
                 result["message"] += f"\nDNS: `{domain_name}`"
             else:
-                await update.message.reply_text(
-                    f"Инстанс создан, но DNS-запись не удалось создать: {dns_result['message']}"
-                )
+                await message.reply_text(f"Инстанс создан, но DNS-запись не удалось создать: {dns_result['message']}")
 
-        await update.message.reply_text(result["message"], parse_mode="MarkdownV2")
+        await message.reply_text(result["message"], parse_mode="MarkdownV2")
         await send_notification(
             context.bot,
             action="created",
@@ -412,7 +426,7 @@ async def droplet_input_name(update: Update, context: ContextTypes.DEFAULT_TYPE)
             price_monthly=data.get("price_monthly"),
         )
     else:
-        await update.message.reply_text(f"Ошибка: {result['message']}")
+        await message.reply_text(f"Ошибка: {result['message']}")
 
     context.user_data.clear()
     return ConversationHandler.END
@@ -571,11 +585,24 @@ async def _show_droplet_list(message, user_id) -> int:
     for inst in instances:
         type_label = DROPLET_TYPES.get(inst["droplet_type"], inst["droplet_type"])
         dns_line = f"DNS: {inst['domain_name']}\n" if inst.get("domain_name") else ""
+
+        # Расчёт потраченных средств
+        cost_line = ""
+        if inst.get("created_at") and inst.get("price_hourly"):
+            try:
+                created = datetime.strptime(inst["created_at"], "%Y-%m-%d %H:%M:%S")
+                hours = (datetime.now() - created).total_seconds() / 3600
+                cost = hours * inst["price_hourly"]
+                cost_line = f"Потрачено: ~${cost:.2f}\n"
+            except (ValueError, TypeError):
+                pass
+
         text = (
             f"Имя: {inst['name']}\n"
             f"IP: {inst['ip_address']}\n"
             f"{dns_line}"
             f"Тип: {type_label}\n"
+            f"{cost_line}"
             f"Срок действия: {inst['expiration_date']}"
         )
         keyboard = [
@@ -769,7 +796,42 @@ async def notify_and_check_instances(context: ContextTypes.DEFAULT_TYPE):
                     logger.error(f"Ошибка отправки сообщения пользователю {creator_id}: {e}")
 
             elif time_left <= 0:
-                logger.info(f"Инстанс '{name}' с ID {droplet_id} должен быть удалён. Запускаем удаление...")
+                logger.info(f"Инстанс '{name}' с ID {droplet_id} должен быть удалён. Создаём снэпшот...")
+
+                # Создание снэпшота перед удалением
+                snapshot_date = datetime.now().strftime("%Y%m%d")
+                snapshot_name = f"{name}-expired-{snapshot_date}"
+                try:
+                    snap_result = await create_snapshot(DIGITALOCEAN_TOKEN, droplet_id, snapshot_name)
+                    if snap_result["success"]:
+                        action_id = snap_result["action_id"]
+                        wait_result = await wait_for_action(DIGITALOCEAN_TOKEN, action_id)
+                        if wait_result["success"]:
+                            logger.info(f"Снэпшот '{snapshot_name}' создан для дроплета {droplet_id}.")
+                            await send_notification(
+                                context.bot,
+                                action="snapshot_created",
+                                droplet_name=name,
+                                ip_address=ip_address,
+                                droplet_type=droplet_type,
+                                expiration_date=str(expiration_date),
+                                creator_id=creator_id,
+                                creator_username=creator_username,
+                            )
+                        else:
+                            logger.warning(
+                                f"Снэпшот для дроплета {droplet_id} не завершён: {wait_result.get('message')}. "
+                                f"Продолжаем удаление."
+                            )
+                    else:
+                        logger.warning(
+                            f"Не удалось создать снэпшот для дроплета {droplet_id}: {snap_result.get('message')}. "
+                            f"Продолжаем удаление."
+                        )
+                except Exception as e:
+                    logger.warning(f"Ошибка снэпшота для дроплета {droplet_id}: {e}. Продолжаем удаление.")
+
+                # Удаление дроплета
                 delete_result = await delete_droplet(
                     DIGITALOCEAN_TOKEN,
                     droplet_id,

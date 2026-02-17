@@ -73,6 +73,14 @@ async def send_notification(
                 f"Тип: {type_label}\n"
                 f"Создатель: {display_name}"
             )
+        elif action == "snapshot_created":
+            text = (
+                f"Снэпшот создан перед удалением\n\n"
+                f"Имя: {droplet_name}\n"
+                f"IP: {ip_address}\n"
+                f"Тип: {type_label}\n"
+                f"Создатель: {display_name}"
+            )
         else:
             text = f"Неизвестное действие: {action} для инстанса {droplet_name}"
 

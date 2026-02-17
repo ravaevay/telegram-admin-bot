@@ -145,6 +145,57 @@ class TestGetExpiringInstances:
         assert result[0]["dns_zone"] == "example.com"
 
 
+class TestSaveWithPricing:
+    def test_save_with_pricing_data(self, tmp_db):
+        init_db()
+        exp = (datetime.now() + timedelta(days=7)).strftime("%Y-%m-%d %H:%M:%S")
+        created = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        save_instance(
+            126, "priced-drop", "1.2.3.4", "s-2vcpu-2gb", exp, 456, 789,
+            created_at=created, price_hourly=0.02679,
+        )
+        instance = get_instance_by_id(126)
+        assert instance is not None
+        assert instance["created_at"] == created
+        assert abs(instance["price_hourly"] - 0.02679) < 0.0001
+
+    def test_save_without_pricing_data(self, tmp_db):
+        """Old-style save without pricing — columns default to None."""
+        init_db()
+        exp = (datetime.now() + timedelta(days=7)).strftime("%Y-%m-%d %H:%M:%S")
+        save_instance(127, "no-price", "1.2.3.4", "s-2vcpu-2gb", exp, 456, 789)
+        instance = get_instance_by_id(127)
+        assert instance is not None
+        assert instance["created_at"] is None
+        assert instance["price_hourly"] is None
+
+    def test_pricing_in_creator_list(self, tmp_db):
+        init_db()
+        exp = (datetime.now() + timedelta(days=1)).strftime("%Y-%m-%d %H:%M:%S")
+        created = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        save_instance(
+            128, "list-drop", "5.5.5.5", "s-2vcpu-4gb", exp, 1, 42,
+            created_at=created, price_hourly=0.05,
+        )
+        result = get_instances_by_creator(42)
+        assert len(result) == 1
+        assert result[0]["created_at"] == created
+        assert result[0]["price_hourly"] == 0.05
+
+    def test_pricing_in_expiring_list(self, tmp_db):
+        init_db()
+        exp = (datetime.now() + timedelta(hours=6)).strftime("%Y-%m-%d %H:%M:%S")
+        created = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        save_instance(
+            129, "expiring-priced", "6.6.6.6", "s-2vcpu-2gb", exp, 1, 42,
+            created_at=created, price_hourly=0.03,
+        )
+        result = get_expiring_instances()
+        assert len(result) == 1
+        assert result[0]["created_at"] == created
+        assert result[0]["price_hourly"] == 0.03
+
+
 class TestUpdateInstanceDns:
     def test_updates_dns_info(self, tmp_db):
         init_db()

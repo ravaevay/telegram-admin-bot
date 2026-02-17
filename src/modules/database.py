@@ -36,22 +36,45 @@ def init_db():
         _migrate_add_column(connection, "domain_name", "TEXT")
         _migrate_add_column(connection, "dns_record_id", "INTEGER")
         _migrate_add_column(connection, "dns_zone", "TEXT")
+        _migrate_add_column(connection, "created_at", "TEXT")
+        _migrate_add_column(connection, "price_hourly", "REAL")
 
     logger.info("База данных инициализирована.")
 
 
 def save_instance(
-    droplet_id, name, ip_address, droplet_type, expiration_date, ssh_key_id, creator_id, creator_username=None
+    droplet_id,
+    name,
+    ip_address,
+    droplet_type,
+    expiration_date,
+    ssh_key_id,
+    creator_id,
+    creator_username=None,
+    created_at=None,
+    price_hourly=None,
 ):
     """Сохранение информации об инстансе в базу данных."""
     try:
         with sqlite3.connect(DB_PATH) as connection:
             connection.execute(
                 """
-            INSERT INTO instances (droplet_id, name, ip_address, droplet_type, expiration_date, ssh_key_id, creator_id, creator_username)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            INSERT INTO instances (droplet_id, name, ip_address, droplet_type, expiration_date, ssh_key_id, creator_id,
+                                   creator_username, created_at, price_hourly)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
-                (droplet_id, name, ip_address, droplet_type, expiration_date, ssh_key_id, creator_id, creator_username),
+                (
+                    droplet_id,
+                    name,
+                    ip_address,
+                    droplet_type,
+                    expiration_date,
+                    ssh_key_id,
+                    creator_id,
+                    creator_username,
+                    created_at,
+                    price_hourly,
+                ),
             )
             connection.commit()
         logger.info(f"Инстанс {name} (ID: {droplet_id}) сохранён в базе данных.")
@@ -66,7 +89,7 @@ def get_instance_by_id(droplet_id):
             connection.row_factory = sqlite3.Row
             cursor = connection.execute(
                 "SELECT droplet_id, name, ip_address, droplet_type, expiration_date, ssh_key_id, creator_id, "
-                "creator_username, domain_name, dns_record_id, dns_zone "
+                "creator_username, domain_name, dns_record_id, dns_zone, created_at, price_hourly "
                 "FROM instances WHERE droplet_id = ?",
                 (droplet_id,),
             )
@@ -86,7 +109,7 @@ def get_instances_by_creator(creator_id):
             connection.row_factory = sqlite3.Row
             cursor = connection.execute(
                 "SELECT droplet_id, name, ip_address, droplet_type, expiration_date, ssh_key_id, creator_id, "
-                "creator_username, domain_name, dns_record_id, dns_zone "
+                "creator_username, domain_name, dns_record_id, dns_zone, created_at, price_hourly "
                 "FROM instances WHERE creator_id = ? ORDER BY expiration_date",
                 (creator_id,),
             )
@@ -103,7 +126,8 @@ def get_expiring_instances():
             connection.row_factory = sqlite3.Row
             cursor = connection.execute("""
             SELECT droplet_id, name, ip_address, droplet_type, expiration_date, ssh_key_id, creator_id,
-                   creator_username, domain_name, dns_record_id, dns_zone
+                   creator_username, domain_name, dns_record_id, dns_zone,
+                   created_at, price_hourly
             FROM instances
             WHERE expiration_date <= datetime('now', 'localtime', '+1 day')
             """)
