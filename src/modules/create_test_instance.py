@@ -205,7 +205,7 @@ async def create_droplet(
             f"Expires: `{_escape_md(expiration_date)}`"
         )
         if price_monthly is not None:
-            msg += f"\nCost: ~${_escape_md(str(price_monthly))}/month"
+            msg += f"\nCost: \\~\\${_escape_md(str(price_monthly))}/month"
 
         return {
             "success": True,
