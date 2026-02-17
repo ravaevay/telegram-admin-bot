@@ -167,6 +167,24 @@ async def reset_input(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int
 # --- Droplet creation conversation ---
 
 
+def _build_ssh_key_keyboard(keys, selected_ids, expanded):
+    """Построить inline-клавиатуру для мультивыбора SSH-ключей."""
+    visible_keys = keys if expanded or len(keys) <= 3 else keys[:3]
+    keyboard = []
+    for key in visible_keys:
+        key_id = str(key["id"])
+        prefix = "✅" if key_id in selected_ids else "⬜"
+        keyboard.append([InlineKeyboardButton(f"{prefix} {key['name']}", callback_data=f"ssh_toggle_{key_id}")])
+
+    if not expanded and len(keys) > 3:
+        remaining = len(keys) - 3
+        keyboard.append([InlineKeyboardButton(f"Другие ключи ({remaining})", callback_data="ssh_more_keys")])
+
+    count = len(selected_ids)
+    keyboard.append([InlineKeyboardButton(f"Продолжить ✓ ({count})", callback_data="ssh_confirm")])
+    return InlineKeyboardMarkup(keyboard)
+
+
 async def droplet_entry(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     """Начало создания инстанса — выбор SSH-ключа."""
     query = update.callback_query
@@ -188,19 +206,69 @@ async def droplet_entry(update: Update, context: ContextTypes.DEFAULT_TYPE) -> i
         return ConversationHandler.END
 
     ssh_keys = result["keys"]
-    keyboard = [[InlineKeyboardButton(key["name"], callback_data=f"ssh_key_{key['id']}")] for key in ssh_keys]
-    reply_markup = InlineKeyboardMarkup(keyboard)
-    await query.message.reply_text("Выберите SSH ключ:", reply_markup=reply_markup)
+    if not ssh_keys:
+        await query.message.reply_text("Нет доступных SSH-ключей в DigitalOcean.")
+        return ConversationHandler.END
+
+    context.user_data["ssh_keys_list"] = ssh_keys
+    context.user_data["selected_ssh_keys"] = {str(k["id"]) for k in ssh_keys[:3]}
+    context.user_data["ssh_keys_expanded"] = False
+
+    reply_markup = _build_ssh_key_keyboard(ssh_keys, context.user_data["selected_ssh_keys"], False)
+    await query.message.reply_text("Выберите SSH ключи:", reply_markup=reply_markup)
     return SELECT_SSH_KEY
 
 
-async def droplet_select_ssh_key(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    """Выбор SSH-ключа — переход к выбору образа."""
+async def droplet_toggle_ssh_key(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Переключение выбора SSH-ключа."""
     query = update.callback_query
     await query.answer()
 
-    ssh_key_id = query.data.removeprefix("ssh_key_")
-    context.user_data["ssh_key_id"] = ssh_key_id
+    key_id = query.data.removeprefix("ssh_toggle_")
+    selected = context.user_data.get("selected_ssh_keys", set())
+
+    if key_id in selected:
+        selected.discard(key_id)
+    else:
+        selected.add(key_id)
+
+    context.user_data["selected_ssh_keys"] = selected
+    reply_markup = _build_ssh_key_keyboard(
+        context.user_data["ssh_keys_list"], selected, context.user_data.get("ssh_keys_expanded", False)
+    )
+    await query.edit_message_reply_markup(reply_markup=reply_markup)
+    return SELECT_SSH_KEY
+
+
+async def droplet_expand_ssh_keys(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Раскрыть полный список SSH-ключей."""
+    query = update.callback_query
+    await query.answer()
+
+    context.user_data["ssh_keys_expanded"] = True
+    reply_markup = _build_ssh_key_keyboard(
+        context.user_data["ssh_keys_list"], context.user_data.get("selected_ssh_keys", set()), True
+    )
+    await query.edit_message_reply_markup(reply_markup=reply_markup)
+    return SELECT_SSH_KEY
+
+
+async def droplet_confirm_ssh_keys(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Подтверждение выбора SSH-ключей — переход к выбору образа."""
+    query = update.callback_query
+
+    selected = context.user_data.get("selected_ssh_keys", set())
+    if not selected:
+        await query.answer("Выберите хотя бы один SSH-ключ", show_alert=True)
+        return SELECT_SSH_KEY
+
+    await query.answer()
+
+    context.user_data["ssh_key_ids"] = [int(k) for k in selected]
+    # Clean up temp data
+    context.user_data.pop("ssh_keys_list", None)
+    context.user_data.pop("selected_ssh_keys", None)
+    context.user_data.pop("ssh_keys_expanded", None)
 
     result = await get_images(DIGITALOCEAN_TOKEN)
     if not result["success"]:
@@ -380,7 +448,7 @@ async def _create_droplet_and_respond(message, user, context, droplet_name) -> i
     result = await create_droplet(
         DIGITALOCEAN_TOKEN,
         droplet_name,
-        data["ssh_key_id"],
+        data["ssh_key_ids"],
         data["droplet_type"],
         data["image"],
         data["duration"],
@@ -921,7 +989,11 @@ def main():
     droplet_conv = ConversationHandler(
         entry_points=[CallbackQueryHandler(droplet_entry, pattern=r"^create_droplet$")],
         states={
-            SELECT_SSH_KEY: [CallbackQueryHandler(droplet_select_ssh_key, pattern=r"^ssh_key_")],
+            SELECT_SSH_KEY: [
+                CallbackQueryHandler(droplet_toggle_ssh_key, pattern=r"^ssh_toggle_"),
+                CallbackQueryHandler(droplet_expand_ssh_keys, pattern=r"^ssh_more_keys$"),
+                CallbackQueryHandler(droplet_confirm_ssh_keys, pattern=r"^ssh_confirm$"),
+            ],
             SELECT_IMAGE: [CallbackQueryHandler(droplet_select_image, pattern=r"^image_")],
             SELECT_DNS_ZONE: [CallbackQueryHandler(droplet_select_dns_zone, pattern=r"^dns_zone_")],
             INPUT_SUBDOMAIN: [MessageHandler(filters.TEXT & ~filters.COMMAND, droplet_input_subdomain)],

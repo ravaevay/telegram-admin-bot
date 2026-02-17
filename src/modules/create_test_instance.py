@@ -161,7 +161,7 @@ async def get_sizes(token):
 async def create_droplet(
     token,
     name,
-    ssh_key_id,
+    ssh_key_ids,
     droplet_type,
     image,
     duration,
@@ -179,13 +179,15 @@ async def create_droplet(
             "region": "fra1",
             "size": droplet_type,
             "image": image,
-            "ssh_keys": [ssh_key_id],
+            "ssh_keys": ssh_key_ids if isinstance(ssh_key_ids, list) else [ssh_key_ids],
             "backups": False,
             "ipv6": True,
             "monitoring": True,
         }
+        tags = ["createdby:telegram-admin-bot"]
         if creator_tag:
-            payload["tags"] = [f"creator:{_sanitize_tag(creator_tag)}"]
+            tags.append(f"creator:{_sanitize_tag(creator_tag)}")
+        payload["tags"] = tags
 
         headers = {**_auth_headers(token), "Content-Type": "application/json"}
 
@@ -214,13 +216,14 @@ async def create_droplet(
 
         # Сохраняем данные в БД
         created_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        key_ids = ssh_key_ids if isinstance(ssh_key_ids, list) else [ssh_key_ids]
         save_instance(
             droplet_id,
             name,
             ip_address,
             droplet_type,
             expiration_date,
-            ssh_key_id,
+            key_ids[0] if key_ids else None,
             creator_id,
             creator_username,
             created_at=created_at,
