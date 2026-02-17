@@ -33,6 +33,16 @@ def _escape_md(text):
     return _MD_ESCAPE_RE.sub(r"\\\1", str(text))
 
 
+_TAG_CLEAN_RE = re.compile(r"[^a-zA-Z0-9_:.\-]")
+
+
+def _sanitize_tag(raw: str) -> str:
+    """Очистка строки для использования как тег DigitalOcean."""
+    tag = raw.lstrip("@")
+    tag = _TAG_CLEAN_RE.sub("", tag)
+    return tag[:255] if tag else "unknown"
+
+
 def _auth_headers(token):
     return {"Authorization": f"Bearer {token}"}
 
@@ -149,7 +159,17 @@ async def get_sizes(token):
 
 
 async def create_droplet(
-    token, name, ssh_key_id, droplet_type, image, duration, creator_id, creator_username=None, price_monthly=None
+    token,
+    name,
+    ssh_key_id,
+    droplet_type,
+    image,
+    duration,
+    creator_id,
+    creator_username=None,
+    price_monthly=None,
+    creator_tag=None,
+    price_hourly=None,
 ):
     """Создаёт Droplet в DigitalOcean."""
     try:
@@ -164,6 +184,8 @@ async def create_droplet(
             "ipv6": True,
             "monitoring": True,
         }
+        if creator_tag:
+            payload["tags"] = [f"creator:{_sanitize_tag(creator_tag)}"]
 
         headers = {**_auth_headers(token), "Content-Type": "application/json"}
 
@@ -191,8 +213,18 @@ async def create_droplet(
             ip_address = "Не удалось получить IP-адрес"
 
         # Сохраняем данные в БД
+        created_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         save_instance(
-            droplet_id, name, ip_address, droplet_type, expiration_date, ssh_key_id, creator_id, creator_username
+            droplet_id,
+            name,
+            ip_address,
+            droplet_type,
+            expiration_date,
+            ssh_key_id,
+            creator_id,
+            creator_username,
+            created_at=created_at,
+            price_hourly=price_hourly,
         )
         logger.info(f"Инстанс {name} создан. ID: {droplet_id}, IP: {ip_address}, срок действия до {expiration_date}")
 
@@ -243,4 +275,46 @@ async def delete_droplet(token, droplet_id, dns_zone=None, dns_record_id=None):
         return {"success": True}
     except httpx.HTTPError as e:
         logger.error(f"Ошибка при удалении Droplet ID {droplet_id}: {e}")
+        return {"success": False, "message": str(e)}
+
+
+async def create_snapshot(token, droplet_id, snapshot_name):
+    """Создаёт снэпшот дроплета перед удалением."""
+    try:
+        payload = {"type": "snapshot", "name": snapshot_name}
+        headers = {**_auth_headers(token), "Content-Type": "application/json"}
+
+        async with httpx.AsyncClient(headers=headers) as client:
+            response = await client.post(f"{BASE_URL}droplets/{droplet_id}/actions", json=payload)
+            response.raise_for_status()
+
+        action = response.json().get("action", {})
+        action_id = action.get("id")
+        logger.info(f"Снэпшот '{snapshot_name}' запущен для дроплета {droplet_id}, action_id={action_id}")
+        return {"success": True, "action_id": action_id}
+    except httpx.HTTPError as e:
+        logger.error(f"Ошибка создания снэпшота для дроплета {droplet_id}: {e}")
+        return {"success": False, "message": str(e)}
+
+
+async def wait_for_action(token, action_id, timeout=600, interval=15):
+    """Ожидание завершения действия DigitalOcean."""
+    deadline = time.time() + timeout
+    try:
+        async with httpx.AsyncClient(headers=_auth_headers(token)) as client:
+            while time.time() < deadline:
+                response = await client.get(f"{BASE_URL}actions/{action_id}")
+                response.raise_for_status()
+                status = response.json().get("action", {}).get("status")
+                if status == "completed":
+                    logger.info(f"Действие {action_id} завершено успешно.")
+                    return {"success": True}
+                if status == "errored":
+                    logger.error(f"Действие {action_id} завершилось с ошибкой.")
+                    return {"success": False, "message": "Action errored"}
+                await asyncio.sleep(interval)
+        logger.warning(f"Действие {action_id} не завершилось за {timeout}с.")
+        return {"success": False, "message": "Timeout"}
+    except httpx.HTTPError as e:
+        logger.error(f"Ошибка при ожидании действия {action_id}: {e}")
         return {"success": False, "message": str(e)}

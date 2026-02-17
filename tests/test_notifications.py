@@ -134,3 +134,19 @@ async def test_auto_deleted_shows_username():
         bot.send_message.assert_called_once()
         text = bot.send_message.call_args[1]["text"]
         assert "@admin" in text
+
+
+@pytest.mark.asyncio
+async def test_snapshot_created_notification():
+    """Snapshot created notification contains expected info."""
+    with patch("modules.notifications.NOTIFICATION_CHANNEL_ID", "-100123456"):
+        bot = AsyncMock()
+        await send_notification(
+            bot, "snapshot_created", "my-drop", "1.2.3.4", "s-2vcpu-2gb", "2025-06-01 12:00:00", 42,
+            creator_username="@admin",
+        )
+        bot.send_message.assert_called_once()
+        text = bot.send_message.call_args[1]["text"]
+        assert "Снэпшот" in text
+        assert "my-drop" in text
+        assert "@admin" in text
