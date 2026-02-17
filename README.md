@@ -19,6 +19,7 @@
 ```
 telegram-admin-bot/
 │── .env                  # Файл с переменными окружения
+│── CLAUDE.md              # Инструкции для Claude Code
 │── docker-compose.yml     # Файл для запуска через Docker
 │── Dockerfile             # Конфигурация контейнера
 │── requirements.txt       # Python-зависимости
@@ -50,7 +51,9 @@ telegram-admin-bot/
 ```
 ---
 
-Создайте файл .env и добавьте в него переменные:
+## **Переменные окружения**
+
+Создайте файл `.env` и добавьте в него переменные:
 ```ini
 # Telegram API
 BOT_TOKEN=your-telegram-bot-token
@@ -58,19 +61,24 @@ BOT_TOKEN=your-telegram-bot-token
 # SSH конфигурация
 SSH_HOST=your-ssh-server
 SSH_PORT=22
-SSH_USER=root
+SSH_USERNAME=root
 SSH_KEY_PATH=/path/to/private/key
 
 # DigitalOcean API
 DIGITALOCEAN_TOKEN=your-do-api-token
+
+# Авторизация (Telegram user IDs через запятую)
+AUTHORIZED_MAIL_USERS=123456789,987654321
+AUTHORIZED_DROPLET_USERS=123456789
 
 # Настройки почтового сервера
 MAIL_DB_USER=root
 MAIL_DB_PASSWORD=my-secret-password
 MAIL_DEFAULT_DOMAIN=example.com
 
-# Уведомления (опционально)
+# Опционально
 NOTIFICATION_CHANNEL_ID=-100123456789
+DB_PATH=./instances.db
 ```
 
 
@@ -82,8 +90,8 @@ NOTIFICATION_CHANNEL_ID=-100123456789
 pip install -r requirements.txt
 python src/bot.py
 ```
-Запуск через docker-compose.yml
-```
+Запуск через Docker:
+```bash
 docker-compose up --build -d
 ```
 
@@ -94,20 +102,20 @@ ruff check src/
 ruff format --check src/
 
 # Запуск тестов
-pip install pytest
+pip install pytest pytest-asyncio
 pytest tests/ -v
 ```
 
 ### **3️⃣ CI/CD**
 GitHub Actions (`.github/workflows/ci.yml`) автоматически запускает:
 - **lint** + **test** — на push/PR в `main`
-- **Docker build & push** — на теги `v*.*.*` (например `v1.0.0`)
+- **Docker build & push** — на push в `main` и теги `v*.*` / `v*.*.*`
 
 Для Docker push необходимо настроить секреты в репозитории (Settings > Secrets):
 - `DOCKERHUB_USERNAME` — логин DockerHub
 - `DOCKERHUB_TOKEN` — токен доступа DockerHub
 
-📬 Как работает бот?
+## 📬 **Как работает бот?**
 1.	Создание почтового ящика
 	-	Бот запрашивает имя ящика (без домена)
 	-	Генерирует случайный пароль
@@ -129,7 +137,7 @@ GitHub Actions (`.github/workflows/ci.yml`) автоматически запу�
 	-	При удалении DNS-запись автоматически удаляется из DigitalOcean
 	-	Если пользователь ничего не делает — создаётся снэпшот, затем инстанс удаляется автоматически (DNS тоже)
 
-📌 Дополнительная информация
+## 📌 **Дополнительная информация**
 -	Поддерживаемые образы DigitalOcean: Ubuntu, CentOS, Fedora
 -	Подключение к почте: IMAP (143, STARTTLS), SMTP (587, STARTTLS)
 -	База данных: SQLite (instances.db хранит информацию о временных инстансах)
