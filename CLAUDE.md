@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project
 
-Telegram admin bot for managing ONLYOFFICE test infrastructure: mailbox creation/password reset on an iRedMail server via SSH, and DigitalOcean droplet lifecycle management (create, extend, auto-delete). Built with python-telegram-bot 20.3 (async, job-queue) and Python 3.9.
+Telegram admin bot for managing ONLYOFFICE test infrastructure: mailbox creation/password reset on an iRedMail server via SSH, and DigitalOcean droplet lifecycle management (create, extend, auto-delete) with DNS A-record automation and live pricing display. Built with python-telegram-bot 20.3 (async, job-queue) and Python 3.9.
 
 ## Commands
 
@@ -49,18 +49,21 @@ CI/CD: `.github/workflows/ci.yml` — lint + test on push/PR to main; Docker bui
 **State machine pattern:** Multi-step user workflows use `ConversationHandler` from python-telegram-bot with states and `context.user_data` to track conversation state.
 
 **Handler flow:**
-- `/start` → `start()` shows inline keyboard with 3 actions
-- Three `ConversationHandler`s (mail creation, password reset, droplet creation) route callback/text input through state machines
+- `/start` → `start()` shows inline keyboard with 4 actions (mail create, password reset, create droplet, manage droplets)
+- Four `ConversationHandler`s (mail creation, password reset, droplet creation, droplet management) route callback/text input through state machines
 - Standalone `CallbackQueryHandler`s for `extend_*` and `delete_*` actions
+
+**Droplet creation conversation states:** `SELECT_SSH_KEY → SELECT_IMAGE → SELECT_DNS_ZONE → INPUT_SUBDOMAIN → SELECT_TYPE → SELECT_DURATION → INPUT_NAME`. DNS steps are skippable (user can choose "Пропустить" or auto-skipped if no domains exist).
 
 **Background job:** `notify_and_check_instances()` runs every 12 hours via `job_queue`. It warns creators about expiring droplets (within 24h) and auto-deletes expired ones.
 
 **Modules:**
 - `config.py` — loads `.env` via python-dotenv, builds `SSH_CONFIG` dict and `AUTHORIZED_GROUPS` dict (keyed by `"mail"` and `"droplet"`)
 - `modules/authorization.py` — `is_authorized(user_id, module)` checks against `AUTHORIZED_GROUPS`
-- `modules/database.py` — SQLite CRUD for `instances` table (droplet_id, name, ip_address, droplet_type, expiration_date, ssh_key_id, creator_id)
+- `modules/database.py` — SQLite CRUD for `instances` table (droplet_id, name, ip_address, droplet_type, expiration_date, ssh_key_id, creator_id, creator_username, domain_name, dns_record_id, dns_zone). Schema migrations via `_migrate_add_column()`. `get_expiring_instances()` returns `list[dict]`.
 - `modules/mail.py` — Paramiko SSH to mail server, runs Python scripts inside `onlyoffice-mail-server` Docker container for mailbox creation/password reset
-- `modules/create_test_instance.py` — DigitalOcean REST API calls (create/delete droplets, list SSH keys/images). Droplets created in `fra1` region.
+- `modules/create_test_instance.py` — DigitalOcean REST API calls (create/delete droplets, list SSH keys/images, DNS record management, size/pricing with 1h TTL cache). Droplets created in `fra1` region.
+- `modules/notifications.py` — Sends droplet event notifications to a Telegram channel. Supports `creator_username` (falls back to ID), `domain_name`, and `price_monthly` display in templates.
 
 **Stale callback queries:** Telegram callback queries expire after ~30s. All standalone `CallbackQueryHandler`s (extend/delete) wrap `query.answer()` in `try/except BadRequest: pass` to avoid crashes on stale buttons.
 
@@ -69,6 +72,8 @@ CI/CD: `.github/workflows/ci.yml` — lint + test on push/PR to main; Docker bui
 ## Environment Variables
 
 Required env vars (see README.md for full template): `BOT_TOKEN`, `SSH_HOST`, `SSH_PORT`, `SSH_USERNAME`, `SSH_KEY_PATH`, `DIGITALOCEAN_TOKEN`, `AUTHORIZED_MAIL_USERS`, `AUTHORIZED_DROPLET_USERS`, `MAIL_DEFAULT_DOMAIN`, `MAIL_DB_USER`, `MAIL_DB_PASSWORD`.
+
+Optional: `NOTIFICATION_CHANNEL_ID` (Telegram channel for droplet event notifications), `DB_PATH` (default `./instances.db`).
 
 ## Security
 
