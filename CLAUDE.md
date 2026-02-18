@@ -83,6 +83,7 @@ Optional: `NOTIFICATION_CHANNEL_ID` (Telegram channel for droplet event notifica
 - **Features:** always create a `feature/<feature_name>` branch, then open a PR to `main`
 - **Bug fixes:** always create a `hotfix/<name>` branch, then open a PR to `main`
 - Never commit directly to `main`
+- **Remote:** push only to `gitea` remote (`git.onlyoffice.com`). Do not push to `origin` (GitHub).
 
 ## Security
 
