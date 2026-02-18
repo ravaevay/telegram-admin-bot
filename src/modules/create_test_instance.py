@@ -181,7 +181,7 @@ async def create_droplet(
             "image": image,
             "ssh_keys": ssh_key_ids if isinstance(ssh_key_ids, list) else [ssh_key_ids],
             "backups": False,
-            "ipv6": True,
+            "ipv6": False,
             "monitoring": True,
         }
         tags = ["createdby:telegram-admin-bot"]
