@@ -33,11 +33,13 @@ python src/fix_db.py
 ruff check src/
 ruff format --check src/
 
-# Tests (pytest) — always run inside Docker container
-docker-compose run --rm bot pytest tests/ -v
+# Tests — check results from GitHub Actions after push (do NOT run locally)
+gh run list --limit 5              # recent runs
+gh run view <run_id>               # run details
+gh run view <run_id> --log         # full log output
 ```
 
-CI/CD: `.github/workflows/ci.yml` — lint + test on push/PR to main; Docker build+push on push to main and `v*.*` / `v*.*.*` tags.
+CI/CD: `.github/workflows/ci.yml` — lint + test on push/PR to main; Docker build+push on push to main and `v*.*` / `v*.*.*` tags. Always verify test results via GitHub Actions after pushing, not by running tests locally.
 
 **Testing gotcha:** `config.py` calls `int(os.getenv(...))` at import time. Tests must set env vars (e.g. `AUTHORIZED_MAIL_USERS=1`) *before* any `src/` import. This is handled in `tests/conftest.py`.
 
