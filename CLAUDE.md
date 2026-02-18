@@ -33,8 +33,8 @@ python src/fix_db.py
 ruff check src/
 ruff format --check src/
 
-# Tests (pytest)
-pytest tests/ -v
+# Tests (pytest) — always run inside Docker container
+docker-compose run --rm bot pytest tests/ -v
 ```
 
 CI/CD: `.github/workflows/ci.yml` — lint + test on push/PR to main; Docker build+push on push to main and `v*.*` / `v*.*.*` tags.
@@ -75,6 +75,12 @@ CI/CD: `.github/workflows/ci.yml` — lint + test on push/PR to main; Docker bui
 Required: `BOT_TOKEN`, `SSH_HOST`, `SSH_PORT`, `SSH_USERNAME`, `SSH_KEY_PATH`, `DIGITALOCEAN_TOKEN`, `AUTHORIZED_MAIL_USERS` (comma-separated user IDs), `AUTHORIZED_DROPLET_USERS` (comma-separated user IDs), `MAIL_DEFAULT_DOMAIN`, `MAIL_DB_USER`, `MAIL_DB_PASSWORD`.
 
 Optional: `NOTIFICATION_CHANNEL_ID` (Telegram channel for droplet event notifications), `DB_PATH` (default `./instances.db`).
+
+## Git Workflow
+
+- **Features:** always create a `feature/<feature_name>` branch, then open a PR to `main`
+- **Bug fixes:** always create a `hotfix/<name>` branch, then open a PR to `main`
+- Never commit directly to `main`
 
 ## Security
 
