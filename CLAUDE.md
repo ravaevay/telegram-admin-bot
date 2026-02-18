@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project
 
-Telegram admin bot for managing ONLYOFFICE test infrastructure: mailbox creation/password reset on an iRedMail server via SSH, and DigitalOcean droplet lifecycle management (create, extend, auto-delete) with DNS A-record automation, live pricing display, cost tracking, creator tagging, and automatic snapshots before expiry deletion. Built with python-telegram-bot 20.3 (async, job-queue) and Python 3.9.
+Telegram admin bot for managing ONLYOFFICE test infrastructure: mailbox creation/password reset on an iRedMail server via SSH, and DigitalOcean droplet lifecycle management (create, extend, auto-delete) with DNS A-record automation, live pricing display, cost tracking, creator tagging, automatic snapshots before expiry deletion, and SSH key preference learning. Built with python-telegram-bot 20.3 (async, job-queue) and Python 3.9.
 
 ## Commands
 
@@ -47,21 +47,21 @@ CI/CD: `.github/workflows/ci.yml` — lint + test on push/PR to main; Docker bui
 
 **Entry point:** `src/bot.py` — registers all handlers and starts polling.
 
-**State machine pattern:** Multi-step user workflows use `ConversationHandler` from python-telegram-bot with states and `context.user_data` to track conversation state.
+**State machine pattern:** Multi-step user workflows use `ConversationHandler` from python-telegram-bot with states and `context.user_data` to track conversation state. Droplet creation and management conversations use `allow_reentry=True` so users can restart a flow without waiting for the 10-minute timeout.
 
 **Handler flow:**
 - `/start` → `start()` shows inline keyboard with 4 actions (mail create, password reset, create droplet, manage droplets)
 - Four `ConversationHandler`s (mail creation, password reset, droplet creation, droplet management) route callback/text input through state machines
 - Standalone `CallbackQueryHandler`s for `extend_*` and `delete_*` actions
 
-**Droplet creation conversation states:** `SELECT_SSH_KEY → SELECT_IMAGE → SELECT_DNS_ZONE → INPUT_SUBDOMAIN → SELECT_TYPE → SELECT_DURATION → INPUT_NAME`. DNS steps are skippable (user can choose "Пропустить" or auto-skipped if no domains exist). When DNS is configured, the FQDN is used as the droplet name and the `INPUT_NAME` step is skipped.
+**Droplet creation conversation states:** `SELECT_SSH_KEY → SELECT_IMAGE → SELECT_DNS_ZONE → INPUT_SUBDOMAIN → SELECT_TYPE → SELECT_DURATION → INPUT_NAME`. DNS steps are skippable (user can choose "Пропустить" or auto-skipped if no domains exist). When DNS is configured, the FQDN is used as the droplet name and the `INPUT_NAME` step is skipped. At `SELECT_SSH_KEY`, keys are reordered by the user's usage history (most frequently used first) and the top-3 preferred keys are auto-selected; new users get the default first-3 selection.
 
 **Background job:** `notify_and_check_instances()` runs every 12 hours via `job_queue`. It warns creators about expiring droplets (within 24h) and auto-deletes expired ones. Before auto-deletion, a snapshot is created and the bot waits for it to complete (up to 600s).
 
 **Modules:**
 - `config.py` — loads `.env` via python-dotenv, builds `SSH_CONFIG` dict and `AUTHORIZED_GROUPS` dict (keyed by `"mail"` and `"droplet"`)
 - `modules/authorization.py` — `is_authorized(user_id, module)` checks against `AUTHORIZED_GROUPS`; `is_authorized_for_bot(user_id)` returns `True` if user belongs to any group (used by `/start`)
-- `modules/database.py` — SQLite CRUD for `instances` table (droplet_id, name, ip_address, droplet_type, expiration_date, ssh_key_id, creator_id, creator_username, domain_name, dns_record_id, dns_zone, created_at, price_hourly). Schema migrations via `_migrate_add_column()`. `get_expiring_instances()` returns `list[dict]`.
+- `modules/database.py` — SQLite CRUD for `instances` table (droplet_id, name, ip_address, droplet_type, expiration_date, ssh_key_id, creator_id, creator_username, domain_name, dns_record_id, dns_zone, created_at, price_hourly) and `ssh_key_usage` table (user_id, ssh_key_id, usage_count, last_used). Schema migrations via `_migrate_add_column()`. `get_expiring_instances()` returns `list[dict]`. `record_ssh_key_usage()` / `get_preferred_ssh_keys()` track per-user SSH key preferences.
 - `modules/mail.py` — Paramiko SSH to mail server, runs Python scripts inside `onlyoffice-mail-server` Docker container for mailbox creation/password reset
 - `modules/create_test_instance.py` — DigitalOcean REST API calls (create/delete droplets, list SSH keys/images, DNS record management, size/pricing with 1h TTL cache, snapshot creation with action polling, creator tagging via `_sanitize_tag()`). Droplets created in `fra1` region.
 - `modules/notifications.py` — Sends droplet event notifications to a Telegram channel. Supports `creator_username` (falls back to ID), `domain_name`, `price_monthly` display, and `snapshot_created` action in templates.
