@@ -9,6 +9,8 @@ from modules.database import (
     get_instances_by_creator,
     get_expiring_instances,
     update_instance_dns,
+    record_ssh_key_usage,
+    get_preferred_ssh_keys,
 )
 
 
@@ -215,3 +217,50 @@ class TestUpdateInstanceDns:
         # Should still return True (UPDATE succeeds with 0 rows affected)
         result = update_instance_dns(999, "sub.example.com", 99999, "example.com")
         assert result is True
+
+
+class TestSshKeyUsage:
+    def test_record_and_retrieve(self, tmp_db):
+        init_db()
+        record_ssh_key_usage(42, [100, 200])
+        result = get_preferred_ssh_keys(42)
+        assert set(result) == {100, 200}
+
+    def test_usage_count_increments(self, tmp_db):
+        init_db()
+        record_ssh_key_usage(42, [100])
+        record_ssh_key_usage(42, [100])
+        result = get_preferred_ssh_keys(42)
+        assert result[0] == 100
+
+    def test_ordering_by_count_then_recency(self, tmp_db):
+        init_db()
+        # key 200 used 3 times, key 100 used 1 time
+        record_ssh_key_usage(42, [100, 200])
+        record_ssh_key_usage(42, [200])
+        record_ssh_key_usage(42, [200])
+        result = get_preferred_ssh_keys(42)
+        assert result[0] == 200
+        assert result[1] == 100
+
+    def test_different_users_independent(self, tmp_db):
+        init_db()
+        record_ssh_key_usage(42, [100])
+        record_ssh_key_usage(99, [200])
+        assert get_preferred_ssh_keys(42) == [100]
+        assert get_preferred_ssh_keys(99) == [200]
+
+    def test_no_history_returns_empty(self, tmp_db):
+        init_db()
+        assert get_preferred_ssh_keys(999) == []
+
+    def test_limit_parameter(self, tmp_db):
+        init_db()
+        record_ssh_key_usage(42, [100, 200, 300, 400, 500])
+        result = get_preferred_ssh_keys(42, limit=2)
+        assert len(result) == 2
+
+    def test_empty_key_list_no_op(self, tmp_db):
+        init_db()
+        record_ssh_key_usage(42, [])
+        assert get_preferred_ssh_keys(42) == []

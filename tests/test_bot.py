@@ -1,8 +1,25 @@
+from unittest.mock import patch
+
 from bot import _build_ssh_key_keyboard
 
 
 def _make_keys(n):
     return [{"id": i + 1, "name": f"key{i + 1}"} for i in range(n)]
+
+
+def _reorder_keys(ssh_keys, preferred_ids):
+    """Reproduce the reordering logic from droplet_entry() for testing."""
+    if preferred_ids:
+        available_ids = {k["id"] for k in ssh_keys}
+        valid_preferred = [pid for pid in preferred_ids if pid in available_ids]
+        preferred_set = set(valid_preferred)
+        preferred_keys = [k for pid in valid_preferred for k in ssh_keys if k["id"] == pid]
+        remaining_keys = [k for k in ssh_keys if k["id"] not in preferred_set]
+        ssh_keys = preferred_keys + remaining_keys
+        preselect = {str(pid) for pid in valid_preferred[:3]}
+    else:
+        preselect = {str(k["id"]) for k in ssh_keys[:3]}
+    return ssh_keys, preselect
 
 
 class TestBuildSshKeyKeyboard:
@@ -57,3 +74,30 @@ class TestBuildSshKeyKeyboard:
         markup = _build_ssh_key_keyboard(keys, {"1"}, expanded=False)
         rows = markup.inline_keyboard
         assert len(rows) == 2  # 1 key row + 1 confirm
+
+
+class TestSshKeyPreferenceReordering:
+    def test_preferred_keys_moved_to_front(self):
+        keys = _make_keys(5)  # ids: 1,2,3,4,5
+        preferred_ids = [4, 5]
+        reordered, preselect = _reorder_keys(keys, preferred_ids)
+        assert reordered[0]["id"] == 4
+        assert reordered[1]["id"] == 5
+        assert preselect == {"4", "5"}
+
+    def test_deleted_preferred_key_skipped(self):
+        keys = _make_keys(3)  # ids: 1,2,3
+        preferred_ids = [99, 2]  # 99 doesn't exist in DO
+        reordered, preselect = _reorder_keys(keys, preferred_ids)
+        assert reordered[0]["id"] == 2
+        assert 99 not in {k["id"] for k in reordered}
+        assert preselect == {"2"}
+
+    def test_preselection_respects_valid_keys_only(self):
+        keys = _make_keys(5)  # ids: 1,2,3,4,5
+        preferred_ids = [5, 99, 3, 100, 1]  # 99, 100 don't exist
+        reordered, preselect = _reorder_keys(keys, preferred_ids)
+        assert reordered[0]["id"] == 5
+        assert reordered[1]["id"] == 3
+        assert reordered[2]["id"] == 1
+        assert preselect == {"5", "3", "1"}

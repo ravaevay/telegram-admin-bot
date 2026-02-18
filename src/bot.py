@@ -36,6 +36,8 @@ from modules.database import (
     get_instance_by_id,
     get_instances_by_creator,
     update_instance_dns,
+    record_ssh_key_usage,
+    get_preferred_ssh_keys,
 )
 from modules.mail import create_mailbox, generate_password, reset_password
 from modules.notifications import send_notification
@@ -210,8 +212,21 @@ async def droplet_entry(update: Update, context: ContextTypes.DEFAULT_TYPE) -> i
         await query.message.reply_text("Нет доступных SSH-ключей в DigitalOcean.")
         return ConversationHandler.END
 
+    # Reorder keys by user preference (most frequently used first)
+    preferred_ids = get_preferred_ssh_keys(user_id)
+    if preferred_ids:
+        available_ids = {k["id"] for k in ssh_keys}
+        valid_preferred = [pid for pid in preferred_ids if pid in available_ids]
+        preferred_set = set(valid_preferred)
+        preferred_keys = [k for pid in valid_preferred for k in ssh_keys if k["id"] == pid]
+        remaining_keys = [k for k in ssh_keys if k["id"] not in preferred_set]
+        ssh_keys = preferred_keys + remaining_keys
+        preselect = {str(pid) for pid in valid_preferred[:3]}
+    else:
+        preselect = {str(k["id"]) for k in ssh_keys[:3]}
+
     context.user_data["ssh_keys_list"] = ssh_keys
-    context.user_data["selected_ssh_keys"] = {str(k["id"]) for k in ssh_keys[:3]}
+    context.user_data["selected_ssh_keys"] = preselect
     context.user_data["ssh_keys_expanded"] = False
 
     reply_markup = _build_ssh_key_keyboard(ssh_keys, context.user_data["selected_ssh_keys"], False)
@@ -478,6 +493,8 @@ async def _create_droplet_and_respond(message, user, context, droplet_name) -> i
                 result["message"] += f"\nDNS: `{domain_name}`"
             else:
                 await message.reply_text(f"Инстанс создан, но DNS-запись не удалось создать: {dns_result['message']}")
+
+        record_ssh_key_usage(user_id, data["ssh_key_ids"])
 
         await message.reply_text(result["message"], parse_mode="MarkdownV2")
         await send_notification(

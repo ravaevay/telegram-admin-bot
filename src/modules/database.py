@@ -39,6 +39,17 @@ def init_db():
         _migrate_add_column(connection, "created_at", "TEXT")
         _migrate_add_column(connection, "price_hourly", "REAL")
 
+        connection.execute("""
+        CREATE TABLE IF NOT EXISTS ssh_key_usage (
+            user_id INTEGER NOT NULL,
+            ssh_key_id INTEGER NOT NULL,
+            usage_count INTEGER NOT NULL DEFAULT 0,
+            last_used TEXT NOT NULL,
+            PRIMARY KEY (user_id, ssh_key_id)
+        )
+        """)
+        connection.commit()
+
     logger.info("База данных инициализирована.")
 
 
@@ -197,3 +208,41 @@ def update_instance_dns(droplet_id, domain_name, dns_record_id, dns_zone):
     except sqlite3.Error as e:
         logger.error(f"Ошибка при обновлении DNS-информации инстанса ID {droplet_id}: {e}")
         return False
+
+
+def record_ssh_key_usage(user_id, ssh_key_ids):
+    """Записать использование SSH-ключей при создании дроплета (UPSERT)."""
+    if not ssh_key_ids:
+        return
+    now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    try:
+        with sqlite3.connect(DB_PATH) as connection:
+            for key_id in ssh_key_ids:
+                connection.execute(
+                    """
+                    INSERT INTO ssh_key_usage (user_id, ssh_key_id, usage_count, last_used)
+                    VALUES (?, ?, 1, ?)
+                    ON CONFLICT(user_id, ssh_key_id) DO UPDATE SET
+                        usage_count = usage_count + 1,
+                        last_used = excluded.last_used
+                    """,
+                    (user_id, key_id, now),
+                )
+            connection.commit()
+        logger.info(f"Обновлена статистика SSH-ключей для пользователя {user_id}: {ssh_key_ids}")
+    except sqlite3.Error as e:
+        logger.error(f"Ошибка при записи использования SSH-ключей для пользователя {user_id}: {e}")
+
+
+def get_preferred_ssh_keys(user_id, limit=10):
+    """Получить предпочитаемые SSH-ключи пользователя, отсортированные по частоте использования."""
+    try:
+        with sqlite3.connect(DB_PATH) as connection:
+            cursor = connection.execute(
+                "SELECT ssh_key_id FROM ssh_key_usage WHERE user_id = ? ORDER BY usage_count DESC, last_used DESC LIMIT ?",
+                (user_id, limit),
+            )
+            return [row[0] for row in cursor.fetchall()]
+    except sqlite3.Error as e:
+        logger.error(f"Ошибка при получении предпочитаемых SSH-ключей для пользователя {user_id}: {e}")
+        return []
