@@ -35,6 +35,7 @@ jobs:
       DIGITALOCEAN_TOKEN: "fake-do-token"
       AUTHORIZED_MAIL_USERS: "1"
       AUTHORIZED_DROPLET_USERS: "1"
+      AUTHORIZED_K8S_USERS: "1"
       MAIL_DEFAULT_DOMAIN: "example.com"
       MAIL_DB_USER: "test"
       MAIL_DB_PASSWORD: "test"

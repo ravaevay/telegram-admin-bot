@@ -28,6 +28,13 @@ from modules.create_test_instance import (
     wait_for_action,
     DROPLET_TYPES,
 )
+from modules.create_k8s_cluster import (
+    create_k8s_cluster,
+    delete_k8s_cluster,
+    get_k8s_cluster,
+    get_k8s_versions,
+    get_k8s_sizes,
+)
 from modules.authorization import is_authorized, is_authorized_for_bot
 from modules.database import (
     init_db,
@@ -38,9 +45,15 @@ from modules.database import (
     update_instance_dns,
     record_ssh_key_usage,
     get_preferred_ssh_keys,
+    get_expiring_k8s_clusters,
+    get_provisioning_k8s_clusters,
+    get_k8s_clusters_by_creator,
+    get_k8s_cluster_by_id,
+    update_k8s_cluster_status,
+    extend_k8s_cluster_expiration,
 )
 from modules.mail import create_mailbox, generate_password, reset_password
-from modules.notifications import send_notification
+from modules.notifications import send_notification, send_k8s_notification
 from datetime import datetime
 
 # Suppress PTBUserWarning for CallbackQueryHandler in ConversationHandler
@@ -61,6 +74,8 @@ MAIL_INPUT = 0
 RESET_INPUT = 0
 SELECT_SSH_KEY, SELECT_IMAGE, SELECT_DNS_ZONE, INPUT_SUBDOMAIN, SELECT_TYPE, SELECT_DURATION, INPUT_NAME = range(7)
 MANAGE_LIST, MANAGE_ACTION, MANAGE_EXTEND, MANAGE_CONFIRM_DELETE = range(100, 104)
+K8S_SELECT_VERSION, K8S_SELECT_NODE_SIZE, K8S_SELECT_NODE_COUNT, K8S_SELECT_DURATION, K8S_INPUT_NAME = range(200, 205)
+K8S_MANAGE_LIST, K8S_MANAGE_ACTION, K8S_MANAGE_EXTEND, K8S_MANAGE_CONFIRM_DELETE = range(205, 209)
 
 # Track users who initiated /start in group chats
 allowed_users = set()
@@ -89,6 +104,8 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         [InlineKeyboardButton("Сброс пароля", callback_data="reset_password")],
         [InlineKeyboardButton("Создать инстанс", callback_data="create_droplet")],
         [InlineKeyboardButton("Управление инстансами", callback_data="manage_droplets")],
+        [InlineKeyboardButton("☸️ Создать K8s кластер", callback_data="create_k8s")],
+        [InlineKeyboardButton("☸️ Мои K8s кластеры", callback_data="manage_k8s")],
     ]
     reply_markup = InlineKeyboardMarkup(keyboard)
     await update.message.reply_text("Добро пожаловать! Выберите действие:", reply_markup=reply_markup)
@@ -829,11 +846,378 @@ async def manage_back(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int
     return await _show_droplet_list(query.message, user_id)
 
 
+# --- K8s cluster creation conversation ---
+
+
+async def k8s_create_entry(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Начало создания K8s кластера — выбор версии Kubernetes."""
+    query = update.callback_query
+    user_id = query.from_user.id
+
+    if not _check_group_access(update, user_id):
+        await query.answer("У вас нет доступа к этой кнопке.", show_alert=True)
+        return ConversationHandler.END
+
+    await query.answer()
+
+    if not is_authorized(user_id, "k8s"):
+        await query.message.reply_text("У вас нет прав для создания K8s кластеров.")
+        return ConversationHandler.END
+
+    result = await get_k8s_versions(DIGITALOCEAN_TOKEN)
+    if not result["success"]:
+        await query.message.reply_text("Не удалось получить список версий Kubernetes. Попробуйте позже.")
+        return ConversationHandler.END
+
+    versions = result["versions"]
+    default_slug = result["default_slug"]
+    keyboard = []
+    for v in versions:
+        slug = v["slug"]
+        label = f"{'✅ ' if slug == default_slug else ''}{slug}"
+        keyboard.append([InlineKeyboardButton(label, callback_data=f"k8s_version_{slug}")])
+
+    await query.message.reply_text("Выберите версию Kubernetes:", reply_markup=InlineKeyboardMarkup(keyboard))
+    return K8S_SELECT_VERSION
+
+
+async def k8s_select_version(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Выбор версии K8s — переход к выбору размера узла."""
+    query = update.callback_query
+    await query.answer()
+
+    version = query.data.removeprefix("k8s_version_")
+    context.user_data["k8s_version"] = version
+
+    result = await get_k8s_sizes(DIGITALOCEAN_TOKEN)
+    if not result["success"] or not result["sizes"]:
+        await query.message.reply_text("Не удалось получить список типов узлов. Попробуйте позже.")
+        return ConversationHandler.END
+
+    sizes = result["sizes"]
+    context.user_data["k8s_sizes"] = sizes
+
+    keyboard = []
+    for slug, info in sizes.items():
+        price_monthly = info.get("price_monthly", 0)
+        keyboard.append([InlineKeyboardButton(f"{slug} — ${price_monthly}/мес", callback_data=f"k8s_size_{slug}")])
+
+    await query.message.reply_text("Выберите тип узла:", reply_markup=InlineKeyboardMarkup(keyboard))
+    return K8S_SELECT_NODE_SIZE
+
+
+async def k8s_select_node_size(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Выбор размера узла — переход к выбору количества узлов."""
+    query = update.callback_query
+    await query.answer()
+
+    node_size = query.data.removeprefix("k8s_size_")
+    context.user_data["k8s_node_size"] = node_size
+
+    sizes = context.user_data.get("k8s_sizes", {})
+    size_info = sizes.get(node_size, {})
+    context.user_data["k8s_price_hourly_per_node"] = size_info.get("price_hourly", 0)
+
+    keyboard = [
+        [InlineKeyboardButton("1 узел", callback_data="k8s_count_1")],
+        [InlineKeyboardButton("2 узла", callback_data="k8s_count_2")],
+        [InlineKeyboardButton("3 узла", callback_data="k8s_count_3")],
+    ]
+    await query.message.reply_text("Выберите количество узлов:", reply_markup=InlineKeyboardMarkup(keyboard))
+    return K8S_SELECT_NODE_COUNT
+
+
+async def k8s_select_node_count(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Выбор количества узлов — переход к выбору длительности."""
+    query = update.callback_query
+    await query.answer()
+
+    node_count = int(query.data.removeprefix("k8s_count_"))
+    context.user_data["k8s_node_count"] = node_count
+
+    price_per_node = context.user_data.get("k8s_price_hourly_per_node", 0)
+    total_hourly = price_per_node * node_count
+
+    durations = [
+        ("1 день", 1),
+        ("3 дня", 3),
+        ("Неделя", 7),
+        ("2 недели", 14),
+    ]
+    keyboard = [
+        [InlineKeyboardButton(f"{label} — ~${total_hourly * 24 * days:.2f}", callback_data=f"k8s_duration_{days}")]
+        for label, days in durations
+    ]
+    await query.message.reply_text(
+        "Выберите длительность аренды кластера:", reply_markup=InlineKeyboardMarkup(keyboard)
+    )
+    return K8S_SELECT_DURATION
+
+
+async def k8s_select_duration(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Выбор длительности — запрос имени кластера."""
+    query = update.callback_query
+    await query.answer()
+
+    duration = int(query.data.removeprefix("k8s_duration_"))
+    context.user_data["k8s_duration"] = duration
+
+    await query.message.reply_text("Введите имя кластера (латинские буквы, цифры и дефис, 2-255 символов):")
+    return K8S_INPUT_NAME
+
+
+async def k8s_input_name(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Получение имени кластера и создание."""
+    cluster_name = update.message.text.strip()
+
+    if not DROPLET_NAME_RE.match(cluster_name):
+        await update.message.reply_text(
+            "Недопустимое имя кластера. Используйте латинские буквы, цифры, точку, дефис или подчёркивание "
+            "(2-255 символов, начинается и заканчивается буквой или цифрой).\nПопробуйте ещё раз:"
+        )
+        return K8S_INPUT_NAME
+
+    return await _create_k8s_cluster_and_respond(update.message, update.effective_user, context, cluster_name)
+
+
+async def _create_k8s_cluster_and_respond(message, user, context, cluster_name) -> int:
+    """Общая логика создания K8s кластера и отправки уведомлений."""
+    user_id = user.id
+    creator_username = f"@{user.username}" if user.username else user.first_name
+    data = context.user_data
+
+    node_count = data.get("k8s_node_count", 2)
+    price_per_node = data.get("k8s_price_hourly_per_node", 0)
+    total_price_hourly = price_per_node * node_count if price_per_node else None
+
+    result = await create_k8s_cluster(
+        token=DIGITALOCEAN_TOKEN,
+        name=cluster_name,
+        region="fra1",
+        version=data["k8s_version"],
+        node_size=data["k8s_node_size"],
+        node_count=node_count,
+        duration=data["k8s_duration"],
+        creator_id=user_id,
+        creator_username=creator_username,
+        price_hourly=total_price_hourly,
+    )
+
+    if result["success"]:
+        cost_line = f"\nСтоимость: ~${total_price_hourly:.4f}/ч" if total_price_hourly else ""
+        text = (
+            f"K8s кластер создаётся (~5-10 мин)\n\n"
+            f"Имя: {result['cluster_name']}\n"
+            f"Регион: {result['region']}\n"
+            f"Версия: {result['version']}\n"
+            f"Узлы: {node_count}x {data['k8s_node_size']}"
+            f"{cost_line}\n"
+            f"Срок действия: {result['expiration_date']}"
+        )
+        await message.reply_text(text)
+        await send_k8s_notification(
+            context.bot,
+            action="created",
+            cluster_name=result["cluster_name"],
+            region=result["region"],
+            node_size=data["k8s_node_size"],
+            node_count=node_count,
+            expiration_date=result["expiration_date"],
+            creator_id=user_id,
+            duration=data["k8s_duration"],
+            creator_username=creator_username,
+            price_hourly=total_price_hourly,
+            version=result["version"],
+        )
+    else:
+        await message.reply_text(f"Ошибка при создании кластера: {result['message']}")
+
+    context.user_data.clear()
+    return ConversationHandler.END
+
+
+# --- K8s cluster management conversation ---
+
+
+async def k8s_manage_entry(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Точка входа: показать список K8s кластеров пользователя."""
+    query = update.callback_query
+    user_id = query.from_user.id
+
+    if not _check_group_access(update, user_id):
+        await query.answer("У вас нет доступа к этой кнопке.", show_alert=True)
+        return ConversationHandler.END
+
+    await query.answer()
+
+    if not is_authorized(user_id, "k8s"):
+        await query.message.reply_text("У вас нет прав для управления K8s кластерами.")
+        return ConversationHandler.END
+
+    return await _show_k8s_cluster_list(query.message, user_id)
+
+
+async def _show_k8s_cluster_list(message, user_id) -> int:
+    """Показать список K8s кластеров пользователя с кнопками управления."""
+    clusters = get_k8s_clusters_by_creator(user_id)
+
+    if not clusters:
+        await message.reply_text("У вас нет активных K8s кластеров.")
+        return ConversationHandler.END
+
+    for cluster in clusters:
+        cost_line = ""
+        if cluster.get("created_at") and cluster.get("price_hourly"):
+            try:
+                created = datetime.strptime(cluster["created_at"], "%Y-%m-%d %H:%M:%S")
+                hours = (datetime.now() - created).total_seconds() / 3600
+                cost = hours * cluster["price_hourly"]
+                cost_line = f"Потрачено: ~${cost:.2f}\n"
+            except (ValueError, TypeError):
+                pass
+
+        status_emoji = "⏳" if cluster["status"] == "provisioning" else "✅" if cluster["status"] == "running" else "❌"
+        text = (
+            f"Имя: {cluster['cluster_name']}\n"
+            f"Статус: {status_emoji} {cluster['status']}\n"
+            f"Регион: {cluster['region']}\n"
+            f"Узлы: {cluster['node_count']}x {cluster['node_size']}\n"
+            f"{cost_line}"
+            f"Срок действия: {cluster['expiration_date']}"
+        )
+        keyboard = [
+            [
+                InlineKeyboardButton("Продлить", callback_data=f"k8s_my_extend_{cluster['cluster_id']}"),
+                InlineKeyboardButton("Удалить", callback_data=f"k8s_my_delete_{cluster['cluster_id']}"),
+            ]
+        ]
+        await message.reply_text(text, reply_markup=InlineKeyboardMarkup(keyboard))
+
+    return K8S_MANAGE_ACTION
+
+
+async def k8s_manage_extend_entry(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Выбор срока продления K8s кластера."""
+    query = update.callback_query
+    await query.answer()
+
+    cluster_id = query.data.removeprefix("k8s_my_extend_")
+    context.user_data["k8s_manage_cluster_id"] = cluster_id
+
+    keyboard = [
+        [InlineKeyboardButton("3 дня", callback_data="k8s_ext_days_3")],
+        [InlineKeyboardButton("7 дней", callback_data="k8s_ext_days_7")],
+    ]
+    await query.message.reply_text("На сколько продлить?", reply_markup=InlineKeyboardMarkup(keyboard))
+    return K8S_MANAGE_EXTEND
+
+
+async def k8s_manage_extend_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Подтверждение продления K8s кластера."""
+    query = update.callback_query
+    await query.answer()
+
+    days = int(query.data.removeprefix("k8s_ext_days_"))
+    cluster_id = context.user_data.get("k8s_manage_cluster_id")
+    user_id = query.from_user.id
+
+    cluster = get_k8s_cluster_by_id(cluster_id)
+    if not cluster:
+        await query.message.reply_text("Кластер не найден.")
+        context.user_data.clear()
+        return ConversationHandler.END
+
+    new_exp = extend_k8s_cluster_expiration(cluster_id, days)
+    if new_exp:
+        await query.message.reply_text(f"Срок действия кластера продлён на {days} дней.")
+        await send_k8s_notification(
+            context.bot,
+            action="extended",
+            cluster_name=cluster["cluster_name"],
+            region=cluster["region"],
+            node_size=cluster["node_size"],
+            node_count=cluster["node_count"],
+            expiration_date=new_exp,
+            creator_id=user_id,
+            duration=days,
+            creator_username=cluster.get("creator_username"),
+        )
+    else:
+        await query.message.reply_text("Ошибка при продлении кластера.")
+
+    context.user_data.clear()
+    return ConversationHandler.END
+
+
+async def k8s_manage_delete_entry(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Запрос подтверждения удаления K8s кластера."""
+    query = update.callback_query
+    await query.answer()
+
+    cluster_id = query.data.removeprefix("k8s_my_delete_")
+    context.user_data["k8s_manage_cluster_id"] = cluster_id
+
+    keyboard = [
+        [
+            InlineKeyboardButton("Да, удалить", callback_data=f"k8s_confirm_delete_{cluster_id}"),
+            InlineKeyboardButton("Отмена", callback_data="k8s_cancel_delete"),
+        ]
+    ]
+    await query.message.reply_text(
+        "Вы уверены, что хотите удалить этот K8s кластер?", reply_markup=InlineKeyboardMarkup(keyboard)
+    )
+    return K8S_MANAGE_CONFIRM_DELETE
+
+
+async def k8s_manage_delete_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Подтверждение удаления K8s кластера."""
+    query = update.callback_query
+    await query.answer()
+
+    cluster_id = query.data.removeprefix("k8s_confirm_delete_")
+    user_id = query.from_user.id
+
+    cluster = get_k8s_cluster_by_id(cluster_id)
+    if not cluster:
+        await query.message.reply_text("Кластер не найден.")
+        context.user_data.clear()
+        return ConversationHandler.END
+
+    delete_result = await delete_k8s_cluster(DIGITALOCEAN_TOKEN, cluster_id)
+    if delete_result["success"]:
+        await query.message.edit_text("K8s кластер успешно удалён!")
+        await send_k8s_notification(
+            context.bot,
+            action="deleted",
+            cluster_name=cluster["cluster_name"],
+            region=cluster["region"],
+            node_size=cluster["node_size"],
+            node_count=cluster["node_count"],
+            expiration_date=cluster["expiration_date"],
+            creator_id=user_id,
+            creator_username=cluster.get("creator_username"),
+        )
+    else:
+        await query.message.reply_text(f"Ошибка при удалении кластера: {delete_result['message']}")
+
+    context.user_data.clear()
+    return ConversationHandler.END
+
+
+async def k8s_manage_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Отмена удаления K8s кластера."""
+    query = update.callback_query
+    await query.answer()
+    await query.message.reply_text("Удаление отменено.")
+    context.user_data.clear()
+    return ConversationHandler.END
+
+
 # --- Background job ---
 
 
 async def notify_and_check_instances(context: ContextTypes.DEFAULT_TYPE):
-    """Фоновая задача для проверки инстансов и отправки уведомлений."""
+    """Фоновая задача для проверки инстансов и K8s кластеров и отправки уведомлений."""
     expiring_instances = get_expiring_instances()
 
     for instance in expiring_instances:
@@ -942,6 +1326,226 @@ async def notify_and_check_instances(context: ContextTypes.DEFAULT_TYPE):
         except Exception as e:
             logger.error(f"Ошибка при обработке инстанса {instance}: {e}")
 
+    # --- K8s: expiry loop ---
+    expiring_clusters = get_expiring_k8s_clusters()
+
+    for cluster in expiring_clusters:
+        try:
+            cluster_id = cluster["cluster_id"]
+            cluster_name = cluster["cluster_name"]
+            expiration_date = cluster["expiration_date"]
+            creator_id = cluster["creator_id"]
+            creator_username = cluster.get("creator_username")
+
+            if isinstance(expiration_date, str):
+                try:
+                    expiration_date = datetime.strptime(expiration_date, "%Y-%m-%d %H:%M:%S")
+                except ValueError:
+                    logger.error(f"Ошибка разбора даты K8s кластера: {expiration_date}")
+                    continue
+
+            time_left = (expiration_date - datetime.now()).total_seconds()
+
+            if 0 < time_left <= 86400:
+                try:
+                    user_chat = await context.bot.get_chat(creator_id)
+                    await user_chat.send_message(
+                        f"K8s кластер **'{cluster_name}'** будет удалён через 24 часа.\n"
+                        f"Хотите продлить срок действия или удалить его сейчас?",
+                        reply_markup=InlineKeyboardMarkup(
+                            [
+                                [InlineKeyboardButton("Продлить на 3 дня", callback_data=f"k8s_extend_3_{cluster_id}")],
+                                [
+                                    InlineKeyboardButton(
+                                        "Продлить на 7 дней", callback_data=f"k8s_extend_7_{cluster_id}"
+                                    )
+                                ],
+                                [InlineKeyboardButton("Удалить сейчас", callback_data=f"k8s_delete_{cluster_id}")],
+                            ]
+                        ),
+                    )
+                    logger.info(f"Уведомление об истечении K8s кластера '{cluster_name}' отправлено {creator_id}.")
+                except Exception as e:
+                    logger.error(f"Ошибка отправки уведомления об истечении K8s кластера {creator_id}: {e}")
+
+            elif time_left <= 0:
+                logger.info(f"K8s кластер '{cluster_name}' истёк. Удаляем...")
+                # NOTE: DOKS clusters don't support snapshots — delete directly
+                delete_result = await delete_k8s_cluster(DIGITALOCEAN_TOKEN, cluster_id)
+                if delete_result["success"]:
+                    logger.info(f"K8s кластер '{cluster_name}' удалён (истёк срок).")
+                    await send_k8s_notification(
+                        context.bot,
+                        action="auto_deleted",
+                        cluster_name=cluster_name,
+                        region=cluster["region"],
+                        node_size=cluster["node_size"],
+                        node_count=cluster["node_count"],
+                        expiration_date=str(expiration_date),
+                        creator_id=creator_id,
+                        creator_username=creator_username,
+                    )
+                else:
+                    logger.error(f"Ошибка при автоудалении K8s кластера '{cluster_name}': {delete_result['message']}")
+
+        except Exception as e:
+            logger.error(f"Ошибка при обработке K8s кластера {cluster}: {e}")
+
+    # --- K8s: provisioning status polling ---
+    provisioning_clusters = get_provisioning_k8s_clusters()
+
+    for cluster in provisioning_clusters:
+        try:
+            cluster_id = cluster["cluster_id"]
+            cluster_name = cluster["cluster_name"]
+            creator_id = cluster["creator_id"]
+
+            status_result = await get_k8s_cluster(DIGITALOCEAN_TOKEN, cluster_id)
+            if not status_result["success"]:
+                logger.warning(f"Не удалось получить статус K8s кластера {cluster_id}: {status_result.get('message')}")
+                continue
+
+            new_state = status_result.get("status")
+            endpoint = status_result.get("endpoint", "")
+
+            if new_state == "running":
+                update_k8s_cluster_status(cluster_id, "running", endpoint=endpoint)
+                logger.info(f"K8s кластер '{cluster_name}' готов. Уведомляем создателя {creator_id}.")
+                try:
+                    endpoint_line = f"\nEndpoint: {endpoint}" if endpoint else ""
+                    await context.bot.send_message(
+                        chat_id=creator_id,
+                        text=f"K8s кластер **'{cluster_name}'** готов!{endpoint_line}",
+                    )
+                except Exception as e:
+                    logger.error(f"Ошибка отправки уведомления о готовности кластера {creator_id}: {e}")
+                await send_k8s_notification(
+                    context.bot,
+                    action="ready",
+                    cluster_name=cluster_name,
+                    region=cluster["region"],
+                    node_size=cluster["node_size"],
+                    node_count=cluster["node_count"],
+                    expiration_date=cluster["expiration_date"],
+                    creator_id=creator_id,
+                    creator_username=cluster.get("creator_username"),
+                    endpoint=endpoint,
+                )
+            elif new_state == "errored":
+                update_k8s_cluster_status(cluster_id, "errored")
+                logger.error(f"K8s кластер '{cluster_name}' завершился с ошибкой.")
+                try:
+                    await context.bot.send_message(
+                        chat_id=creator_id,
+                        text=f"K8s кластер **'{cluster_name}'** завершился с ошибкой при создании.",
+                    )
+                except Exception as e:
+                    logger.error(f"Ошибка отправки уведомления об ошибке кластера {creator_id}: {e}")
+                await send_k8s_notification(
+                    context.bot,
+                    action="errored",
+                    cluster_name=cluster_name,
+                    region=cluster["region"],
+                    node_size=cluster["node_size"],
+                    node_count=cluster["node_count"],
+                    expiration_date=cluster["expiration_date"],
+                    creator_id=creator_id,
+                    creator_username=cluster.get("creator_username"),
+                )
+
+        except Exception as e:
+            logger.error(f"Ошибка при проверке статуса K8s кластера {cluster}: {e}")
+
+
+# --- Standalone K8s callback handlers (extend / delete from background job notifications) ---
+
+
+async def handle_k8s_extend(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Продление K8s кластера из уведомления фоновой задачи."""
+    query = update.callback_query
+    user_id = query.from_user.id
+    try:
+        await query.answer()
+    except BadRequest:
+        pass
+
+    try:
+        parts = query.data.split("_")
+        # format: k8s_extend_{days}_{cluster_id}  (cluster_id may contain hyphens)
+        days = int(parts[2])
+        cluster_id = "_".join(parts[3:])
+    except (IndexError, ValueError):
+        await query.message.reply_text("Ошибка: некорректные данные запроса.")
+        return
+
+    cluster = get_k8s_cluster_by_id(cluster_id)
+    if not cluster:
+        await query.message.reply_text("K8s кластер не найден.")
+        return
+
+    if cluster["creator_id"] != user_id:
+        logger.warning(f"Пользователь {user_id} попытался продлить чужой K8s кластер {cluster_id}")
+        await query.message.reply_text("У вас нет прав для продления этого кластера.")
+        return
+
+    new_exp = extend_k8s_cluster_expiration(cluster_id, days)
+    if new_exp:
+        await query.message.reply_text(f"Срок действия кластера продлён на {days} дней.")
+        await send_k8s_notification(
+            context.bot,
+            action="extended",
+            cluster_name=cluster["cluster_name"],
+            region=cluster["region"],
+            node_size=cluster["node_size"],
+            node_count=cluster["node_count"],
+            expiration_date=new_exp,
+            creator_id=user_id,
+            duration=days,
+            creator_username=cluster.get("creator_username"),
+        )
+    else:
+        await query.message.reply_text("Ошибка при продлении кластера. Попробуйте позже.")
+
+
+async def handle_k8s_delete(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Удаление K8s кластера из уведомления фоновой задачи."""
+    query = update.callback_query
+    user_id = query.from_user.id
+    try:
+        await query.answer()
+    except BadRequest:
+        pass
+
+    # format: k8s_delete_{cluster_id}  (cluster_id may contain hyphens)
+    cluster_id = query.data.removeprefix("k8s_delete_")
+
+    cluster = get_k8s_cluster_by_id(cluster_id)
+    if not cluster:
+        await query.message.reply_text("K8s кластер не найден.")
+        return
+
+    if cluster["creator_id"] != user_id:
+        logger.warning(f"Пользователь {user_id} попытался удалить чужой K8s кластер {cluster_id}")
+        await query.message.reply_text("У вас нет прав для удаления этого кластера.")
+        return
+
+    delete_result = await delete_k8s_cluster(DIGITALOCEAN_TOKEN, cluster_id)
+    if delete_result["success"]:
+        await query.message.edit_text("K8s кластер успешно удалён!")
+        await send_k8s_notification(
+            context.bot,
+            action="deleted",
+            cluster_name=cluster["cluster_name"],
+            region=cluster["region"],
+            node_size=cluster["node_size"],
+            node_count=cluster["node_count"],
+            expiration_date=cluster["expiration_date"],
+            creator_id=user_id,
+            creator_username=cluster.get("creator_username"),
+        )
+    else:
+        await query.message.reply_text(f"Ошибка при удалении кластера: {delete_result['message']}")
+
 
 # --- Error handler ---
 
@@ -1048,14 +1652,58 @@ def main():
         per_chat=True,
     )
 
+    # Conversation: K8s cluster creation
+    k8s_create_conv = ConversationHandler(
+        entry_points=[CallbackQueryHandler(k8s_create_entry, pattern=r"^create_k8s$")],
+        states={
+            K8S_SELECT_VERSION: [CallbackQueryHandler(k8s_select_version, pattern=r"^k8s_version_")],
+            K8S_SELECT_NODE_SIZE: [CallbackQueryHandler(k8s_select_node_size, pattern=r"^k8s_size_")],
+            K8S_SELECT_NODE_COUNT: [CallbackQueryHandler(k8s_select_node_count, pattern=r"^k8s_count_")],
+            K8S_SELECT_DURATION: [CallbackQueryHandler(k8s_select_duration, pattern=r"^k8s_duration_")],
+            K8S_INPUT_NAME: [MessageHandler(filters.TEXT & ~filters.COMMAND, k8s_input_name)],
+        },
+        fallbacks=[CommandHandler("cancel", cancel)],
+        allow_reentry=True,
+        conversation_timeout=CONVERSATION_TIMEOUT,
+        per_user=True,
+        per_chat=True,
+    )
+
+    # Conversation: K8s cluster management
+    k8s_manage_conv = ConversationHandler(
+        entry_points=[CallbackQueryHandler(k8s_manage_entry, pattern=r"^manage_k8s$")],
+        states={
+            K8S_MANAGE_ACTION: [
+                CallbackQueryHandler(k8s_manage_extend_entry, pattern=r"^k8s_my_extend_"),
+                CallbackQueryHandler(k8s_manage_delete_entry, pattern=r"^k8s_my_delete_"),
+            ],
+            K8S_MANAGE_EXTEND: [
+                CallbackQueryHandler(k8s_manage_extend_confirm, pattern=r"^k8s_ext_days_"),
+            ],
+            K8S_MANAGE_CONFIRM_DELETE: [
+                CallbackQueryHandler(k8s_manage_delete_confirm, pattern=r"^k8s_confirm_delete_"),
+                CallbackQueryHandler(k8s_manage_cancel, pattern=r"^k8s_cancel_delete$"),
+            ],
+        },
+        fallbacks=[CommandHandler("cancel", cancel)],
+        allow_reentry=True,
+        conversation_timeout=CONVERSATION_TIMEOUT,
+        per_user=True,
+        per_chat=True,
+    )
+
     # Register handlers (order matters — conversations first, then standalone callbacks)
     app.add_handler(CommandHandler("start", start))
     app.add_handler(mail_conv)
     app.add_handler(reset_conv)
     app.add_handler(droplet_conv)
     app.add_handler(manage_conv)
+    app.add_handler(k8s_create_conv)
+    app.add_handler(k8s_manage_conv)
     app.add_handler(CallbackQueryHandler(handle_extend, pattern=r"^extend_"))
     app.add_handler(CallbackQueryHandler(handle_delete, pattern=r"^delete_"))
+    app.add_handler(CallbackQueryHandler(handle_k8s_extend, pattern=r"^k8s_extend_"))
+    app.add_handler(CallbackQueryHandler(handle_k8s_delete, pattern=r"^k8s_delete_"))
 
     app.add_error_handler(error_handler)
 

@@ -153,8 +153,15 @@ class TestSaveWithPricing:
         exp = (datetime.now() + timedelta(days=7)).strftime("%Y-%m-%d %H:%M:%S")
         created = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         save_instance(
-            126, "priced-drop", "1.2.3.4", "s-2vcpu-2gb", exp, 456, 789,
-            created_at=created, price_hourly=0.02679,
+            126,
+            "priced-drop",
+            "1.2.3.4",
+            "s-2vcpu-2gb",
+            exp,
+            456,
+            789,
+            created_at=created,
+            price_hourly=0.02679,
         )
         instance = get_instance_by_id(126)
         assert instance is not None
@@ -176,8 +183,15 @@ class TestSaveWithPricing:
         exp = (datetime.now() + timedelta(days=1)).strftime("%Y-%m-%d %H:%M:%S")
         created = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         save_instance(
-            128, "list-drop", "5.5.5.5", "s-2vcpu-4gb", exp, 1, 42,
-            created_at=created, price_hourly=0.05,
+            128,
+            "list-drop",
+            "5.5.5.5",
+            "s-2vcpu-4gb",
+            exp,
+            1,
+            42,
+            created_at=created,
+            price_hourly=0.05,
         )
         result = get_instances_by_creator(42)
         assert len(result) == 1
@@ -189,8 +203,15 @@ class TestSaveWithPricing:
         exp = (datetime.now() + timedelta(hours=6)).strftime("%Y-%m-%d %H:%M:%S")
         created = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         save_instance(
-            129, "expiring-priced", "6.6.6.6", "s-2vcpu-2gb", exp, 1, 42,
-            created_at=created, price_hourly=0.03,
+            129,
+            "expiring-priced",
+            "6.6.6.6",
+            "s-2vcpu-2gb",
+            exp,
+            1,
+            42,
+            created_at=created,
+            price_hourly=0.03,
         )
         result = get_expiring_instances()
         assert len(result) == 1

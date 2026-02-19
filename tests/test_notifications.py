@@ -56,7 +56,13 @@ async def test_created_shows_username():
     with patch("modules.notifications.NOTIFICATION_CHANNEL_ID", "-100123456"):
         bot = AsyncMock()
         await send_notification(
-            bot, "created", "my-drop", "1.2.3.4", "s-2vcpu-2gb", "2025-06-01 12:00:00", 42,
+            bot,
+            "created",
+            "my-drop",
+            "1.2.3.4",
+            "s-2vcpu-2gb",
+            "2025-06-01 12:00:00",
+            42,
             creator_username="@testuser",
         )
         bot.send_message.assert_called_once()
@@ -71,7 +77,13 @@ async def test_created_falls_back_to_creator_id():
     with patch("modules.notifications.NOTIFICATION_CHANNEL_ID", "-100123456"):
         bot = AsyncMock()
         await send_notification(
-            bot, "created", "my-drop", "1.2.3.4", "s-2vcpu-2gb", "2025-06-01 12:00:00", 42,
+            bot,
+            "created",
+            "my-drop",
+            "1.2.3.4",
+            "s-2vcpu-2gb",
+            "2025-06-01 12:00:00",
+            42,
         )
         bot.send_message.assert_called_once()
         text = bot.send_message.call_args[1]["text"]
@@ -84,7 +96,13 @@ async def test_created_shows_dns():
     with patch("modules.notifications.NOTIFICATION_CHANNEL_ID", "-100123456"):
         bot = AsyncMock()
         await send_notification(
-            bot, "created", "my-drop", "1.2.3.4", "s-2vcpu-2gb", "2025-06-01 12:00:00", 42,
+            bot,
+            "created",
+            "my-drop",
+            "1.2.3.4",
+            "s-2vcpu-2gb",
+            "2025-06-01 12:00:00",
+            42,
             domain_name="test.example.com",
         )
         bot.send_message.assert_called_once()
@@ -99,7 +117,13 @@ async def test_created_shows_cost():
     with patch("modules.notifications.NOTIFICATION_CHANNEL_ID", "-100123456"):
         bot = AsyncMock()
         await send_notification(
-            bot, "created", "my-drop", "1.2.3.4", "s-2vcpu-2gb", "2025-06-01 12:00:00", 42,
+            bot,
+            "created",
+            "my-drop",
+            "1.2.3.4",
+            "s-2vcpu-2gb",
+            "2025-06-01 12:00:00",
+            42,
             price_monthly=18.0,
         )
         bot.send_message.assert_called_once()
@@ -114,7 +138,13 @@ async def test_deleted_shows_username():
     with patch("modules.notifications.NOTIFICATION_CHANNEL_ID", "-100123456"):
         bot = AsyncMock()
         await send_notification(
-            bot, "deleted", "my-drop", "1.2.3.4", "s-2vcpu-2gb", "2025-06-01 12:00:00", 42,
+            bot,
+            "deleted",
+            "my-drop",
+            "1.2.3.4",
+            "s-2vcpu-2gb",
+            "2025-06-01 12:00:00",
+            42,
             creator_username="@admin",
         )
         bot.send_message.assert_called_once()
@@ -128,7 +158,13 @@ async def test_auto_deleted_shows_username():
     with patch("modules.notifications.NOTIFICATION_CHANNEL_ID", "-100123456"):
         bot = AsyncMock()
         await send_notification(
-            bot, "auto_deleted", "my-drop", "1.2.3.4", "s-2vcpu-2gb", "2025-06-01 12:00:00", 42,
+            bot,
+            "auto_deleted",
+            "my-drop",
+            "1.2.3.4",
+            "s-2vcpu-2gb",
+            "2025-06-01 12:00:00",
+            42,
             creator_username="@admin",
         )
         bot.send_message.assert_called_once()
@@ -142,7 +178,13 @@ async def test_snapshot_created_notification():
     with patch("modules.notifications.NOTIFICATION_CHANNEL_ID", "-100123456"):
         bot = AsyncMock()
         await send_notification(
-            bot, "snapshot_created", "my-drop", "1.2.3.4", "s-2vcpu-2gb", "2025-06-01 12:00:00", 42,
+            bot,
+            "snapshot_created",
+            "my-drop",
+            "1.2.3.4",
+            "s-2vcpu-2gb",
+            "2025-06-01 12:00:00",
+            42,
             creator_username="@admin",
         )
         bot.send_message.assert_called_once()
