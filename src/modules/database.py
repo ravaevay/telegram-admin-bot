@@ -50,6 +50,27 @@ def init_db():
         """)
         connection.commit()
 
+        connection.execute("""
+        CREATE TABLE IF NOT EXISTS k8s_clusters (
+            cluster_id       TEXT PRIMARY KEY,
+            cluster_name     TEXT NOT NULL,
+            region           TEXT NOT NULL,
+            version          TEXT NOT NULL,
+            node_size        TEXT NOT NULL,
+            node_count       INTEGER NOT NULL,
+            status           TEXT NOT NULL,
+            endpoint         TEXT,
+            creator_id       INTEGER NOT NULL,
+            creator_username TEXT,
+            expiration_date  TEXT NOT NULL,
+            created_at       TEXT NOT NULL,
+            price_hourly     REAL,
+            ha               INTEGER NOT NULL DEFAULT 0,
+            UNIQUE(cluster_name, creator_id)
+        )
+        """)
+        connection.commit()
+
     logger.info("База данных инициализирована.")
 
 
@@ -246,3 +267,199 @@ def get_preferred_ssh_keys(user_id, limit=10):
     except sqlite3.Error as e:
         logger.error(f"Ошибка при получении предпочитаемых SSH-ключей для пользователя {user_id}: {e}")
         return []
+
+
+# --- K8s cluster CRUD ---
+
+
+def save_k8s_cluster(
+    cluster_id,
+    cluster_name,
+    region,
+    version,
+    node_size,
+    node_count,
+    status,
+    endpoint,
+    creator_id,
+    creator_username=None,
+    expiration_date=None,
+    created_at=None,
+    price_hourly=None,
+    ha=False,
+):
+    """Сохранение информации о K8s кластере в базу данных."""
+    try:
+        with sqlite3.connect(DB_PATH) as connection:
+            connection.execute(
+                """
+                INSERT INTO k8s_clusters (
+                    cluster_id, cluster_name, region, version, node_size, node_count,
+                    status, endpoint, creator_id, creator_username,
+                    expiration_date, created_at, price_hourly, ha
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    cluster_id,
+                    cluster_name,
+                    region,
+                    version,
+                    node_size,
+                    node_count,
+                    status,
+                    endpoint,
+                    creator_id,
+                    creator_username,
+                    expiration_date,
+                    created_at,
+                    price_hourly,
+                    1 if ha else 0,
+                ),
+            )
+            connection.commit()
+        logger.info(f"K8s кластер '{cluster_name}' (ID: {cluster_id}) сохранён в базе данных.")
+    except sqlite3.Error as e:
+        logger.error(f"Ошибка при сохранении K8s кластера '{cluster_name}' в базе данных: {e}")
+
+
+def get_k8s_cluster_by_id(cluster_id):
+    """Получить K8s кластер по ID. Возвращает dict или None."""
+    try:
+        with sqlite3.connect(DB_PATH) as connection:
+            connection.row_factory = sqlite3.Row
+            cursor = connection.execute(
+                "SELECT * FROM k8s_clusters WHERE cluster_id = ?",
+                (cluster_id,),
+            )
+            row = cursor.fetchone()
+            return dict(row) if row else None
+    except sqlite3.Error as e:
+        logger.error(f"Ошибка при получении K8s кластера ID {cluster_id}: {e}")
+        return None
+
+
+def get_k8s_cluster_by_name(cluster_name, creator_id):
+    """Получить K8s кластер по имени и создателю (для проверки идемпотентности). Возвращает dict или None."""
+    try:
+        with sqlite3.connect(DB_PATH) as connection:
+            connection.row_factory = sqlite3.Row
+            cursor = connection.execute(
+                "SELECT * FROM k8s_clusters WHERE cluster_name = ? AND creator_id = ? AND status != 'deleted'",
+                (cluster_name, creator_id),
+            )
+            row = cursor.fetchone()
+            return dict(row) if row else None
+    except sqlite3.Error as e:
+        logger.error(f"Ошибка при поиске K8s кластера '{cluster_name}' пользователя {creator_id}: {e}")
+        return None
+
+
+def get_k8s_clusters_by_creator(creator_id):
+    """Получить все K8s кластеры, созданные пользователем. Возвращает list[dict]."""
+    try:
+        with sqlite3.connect(DB_PATH) as connection:
+            connection.row_factory = sqlite3.Row
+            cursor = connection.execute(
+                "SELECT * FROM k8s_clusters WHERE creator_id = ? AND status != 'deleted' ORDER BY expiration_date",
+                (creator_id,),
+            )
+            return [dict(row) for row in cursor.fetchall()]
+    except sqlite3.Error as e:
+        logger.error(f"Ошибка при получении K8s кластеров пользователя {creator_id}: {e}")
+        return []
+
+
+def update_k8s_cluster_status(cluster_id, status, endpoint=None):
+    """Обновить статус K8s кластера (и опционально endpoint) в базе данных."""
+    try:
+        with sqlite3.connect(DB_PATH) as connection:
+            if endpoint is not None:
+                connection.execute(
+                    "UPDATE k8s_clusters SET status = ?, endpoint = ? WHERE cluster_id = ?",
+                    (status, endpoint, cluster_id),
+                )
+            else:
+                connection.execute(
+                    "UPDATE k8s_clusters SET status = ? WHERE cluster_id = ?",
+                    (status, cluster_id),
+                )
+            connection.commit()
+        logger.info(f"Статус K8s кластера {cluster_id} обновлён: {status}")
+        return True
+    except sqlite3.Error as e:
+        logger.error(f"Ошибка при обновлении статуса K8s кластера {cluster_id}: {e}")
+        return False
+
+
+def delete_k8s_cluster(cluster_id):
+    """Удаляет запись о K8s кластере из базы данных."""
+    try:
+        with sqlite3.connect(DB_PATH) as connection:
+            cursor = connection.execute("DELETE FROM k8s_clusters WHERE cluster_id = ?", (cluster_id,))
+            connection.commit()
+            if cursor.rowcount > 0:
+                logger.info(f"Запись о K8s кластере ID {cluster_id} успешно удалена из базы данных.")
+                return True
+            else:
+                logger.warning(f"Запись о K8s кластере ID {cluster_id} не найдена в базе данных.")
+                return False
+    except sqlite3.Error as e:
+        logger.error(f"Ошибка при удалении K8s кластера ID {cluster_id} из базы данных: {e}")
+        return False
+
+
+def get_expiring_k8s_clusters():
+    """Получить K8s кластеры, срок действия которых истекает через 24 часа. Возвращает list[dict]."""
+    try:
+        with sqlite3.connect(DB_PATH) as connection:
+            connection.row_factory = sqlite3.Row
+            cursor = connection.execute("""
+            SELECT * FROM k8s_clusters
+            WHERE status != 'deleted'
+              AND expiration_date <= datetime('now', 'localtime', '+1 day')
+            """)
+            return [dict(row) for row in cursor.fetchall()]
+    except sqlite3.Error as e:
+        logger.error(f"Ошибка при получении K8s кластеров с истекающим сроком: {e}")
+        return []
+
+
+def get_provisioning_k8s_clusters():
+    """Получить K8s кластеры в статусе 'provisioning'. Возвращает list[dict]."""
+    try:
+        with sqlite3.connect(DB_PATH) as connection:
+            connection.row_factory = sqlite3.Row
+            cursor = connection.execute(
+                "SELECT * FROM k8s_clusters WHERE status = 'provisioning'",
+            )
+            return [dict(row) for row in cursor.fetchall()]
+    except sqlite3.Error as e:
+        logger.error(f"Ошибка при получении provisioning K8s кластеров: {e}")
+        return []
+
+
+def extend_k8s_cluster_expiration(cluster_id, days):
+    """Продлить срок действия K8s кластера в базе данных."""
+    logger.info(f"Продление K8s кластера ID {cluster_id} на {days} дней")
+    try:
+        with sqlite3.connect(DB_PATH) as connection:
+            cursor = connection.execute("SELECT expiration_date FROM k8s_clusters WHERE cluster_id = ?", (cluster_id,))
+            row = cursor.fetchone()
+            if not row:
+                logger.error(f"K8s кластер ID {cluster_id} не найден в БД.")
+                return None
+
+            current_expiration = datetime.strptime(row[0], "%Y-%m-%d %H:%M:%S")
+            new_expiration = current_expiration + timedelta(days=days)
+            new_expiration_str = new_expiration.strftime("%Y-%m-%d %H:%M:%S")
+
+            connection.execute(
+                "UPDATE k8s_clusters SET expiration_date = ? WHERE cluster_id = ?",
+                (new_expiration_str, cluster_id),
+            )
+            connection.commit()
+            logger.info(f"K8s кластер {cluster_id} продлен до {new_expiration_str}")
+            return new_expiration_str
+    except Exception as e:
+        logger.error(f"Ошибка при продлении K8s кластера {cluster_id}: {e}")
+        return None

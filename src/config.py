@@ -18,6 +18,7 @@ DIGITALOCEAN_TOKEN = os.getenv("DIGITALOCEAN_TOKEN")
 AUTHORIZED_GROUPS = {
     "mail": list(map(int, os.getenv("AUTHORIZED_MAIL_USERS", "").split(","))),
     "droplet": list(map(int, os.getenv("AUTHORIZED_DROPLET_USERS", "").split(","))),
+    "k8s": [int(x) for x in os.getenv("AUTHORIZED_K8S_USERS", "").split(",") if x.strip()],
 }
 
 DB_PATH = os.getenv("DB_PATH", "./instances.db")

@@ -41,21 +41,13 @@ def _make_mock_client():
 
     # POST response — droplet created
     post_response = MagicMock()
-    post_response.json.return_value = {
-        "droplet": {"id": 12345, "name": "test-droplet"}
-    }
+    post_response.json.return_value = {"droplet": {"id": 12345, "name": "test-droplet"}}
     post_response.raise_for_status = MagicMock()
     mock_client.post.return_value = post_response
 
     # GET response — IP polling (returns IP immediately)
     get_response = MagicMock()
-    get_response.json.return_value = {
-        "droplet": {
-            "networks": {
-                "v4": [{"ip_address": "1.2.3.4"}]
-            }
-        }
-    }
+    get_response.json.return_value = {"droplet": {"networks": {"v4": [{"ip_address": "1.2.3.4"}]}}}
     get_response.raise_for_status = MagicMock()
     mock_client.get.return_value = get_response
 
