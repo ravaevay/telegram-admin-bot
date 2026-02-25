@@ -1415,9 +1415,15 @@ async def poll_provisioning_clusters(context: ContextTypes.DEFAULT_TYPE):
             new_state = status_result.get("status")
             endpoint = status_result.get("endpoint", "")
 
-            if new_state == "running":
-                update_k8s_cluster_status(cluster_id, "running", endpoint=endpoint)
-                logger.info(f"K8s кластер '{cluster_name}' готов. Получаем kubeconfig и уведомляем {creator_id}.")
+            logger.info(f"K8s кластер '{cluster_name}' ({cluster_id}): статус DO = {new_state!r}")
+
+            if new_state in ("running", "degraded"):
+                ok = update_k8s_cluster_status(cluster_id, "running", endpoint=endpoint)
+                if not ok:
+                    logger.warning(f"Не удалось обновить статус кластера {cluster_id} в БД")
+                    continue
+                degraded_note = "\n⚠️ Кластер запущен в деградированном состоянии." if new_state == "degraded" else ""
+                logger.info(f"K8s кластер '{cluster_name}' готов (state={new_state!r}). Получаем kubeconfig и уведомляем {creator_id}.")
 
                 # Fetch kubeconfig
                 kube_result = await get_kubeconfig(DIGITALOCEAN_TOKEN, cluster_id)
@@ -1426,7 +1432,7 @@ async def poll_provisioning_clusters(context: ContextTypes.DEFAULT_TYPE):
                 try:
                     await context.bot.send_message(
                         chat_id=creator_id,
-                        text=f"K8s кластер <b>{cluster_name}</b> готов!{endpoint_line}",
+                        text=f"K8s кластер <b>{cluster_name}</b> готов!{endpoint_line}{degraded_note}",
                         parse_mode="HTML",
                     )
                 except Exception as e:
