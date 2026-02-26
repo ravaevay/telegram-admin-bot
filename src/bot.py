@@ -66,7 +66,7 @@ logger = logging.getLogger(__name__)
 
 # --- Constants ---
 NOTIFY_INTERVAL_SECONDS = 43200  # 12 hours
-K8S_POLL_INTERVAL_SECONDS = 30   # poll provisioning clusters every 30s
+K8S_POLL_INTERVAL_SECONDS = 30  # poll provisioning clusters every 30s
 CONVERSATION_TIMEOUT = 600  # 10 minutes
 
 DROPLET_NAME_RE = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9._-]{0,253}[a-zA-Z0-9]$")
@@ -1423,7 +1423,9 @@ async def poll_provisioning_clusters(context: ContextTypes.DEFAULT_TYPE):
                     logger.warning(f"Не удалось обновить статус кластера {cluster_id} в БД")
                     continue
                 degraded_note = "\n⚠️ Кластер запущен в деградированном состоянии." if new_state == "degraded" else ""
-                logger.info(f"K8s кластер '{cluster_name}' готов (state={new_state!r}). Получаем kubeconfig и уведомляем {creator_id}.")
+                logger.info(
+                    f"K8s кластер '{cluster_name}' готов (state={new_state!r}). Получаем kubeconfig и уведомляем {creator_id}."
+                )
 
                 # Fetch kubeconfig
                 kube_result = await get_kubeconfig(DIGITALOCEAN_TOKEN, cluster_id)
@@ -1450,7 +1452,9 @@ async def poll_provisioning_clusters(context: ContextTypes.DEFAULT_TYPE):
                     except Exception as e:
                         logger.error(f"Ошибка отправки kubeconfig кластера {cluster_id} пользователю {creator_id}: {e}")
                 else:
-                    logger.warning(f"Не удалось получить kubeconfig для кластера {cluster_id}: {kube_result.get('message')}")
+                    logger.warning(
+                        f"Не удалось получить kubeconfig для кластера {cluster_id}: {kube_result.get('message')}"
+                    )
 
                 await send_k8s_notification(
                     context.bot,
