@@ -275,10 +275,10 @@ async def wait_for_cluster_ready(token, cluster_id, timeout=CLUSTER_POLL_TIMEOUT
                 response = await _do_request_with_retry(client, "get", BASE_URL + f"kubernetes/clusters/{cluster_id}")
                 cluster = response.json().get("kubernetes_cluster", {})
                 state = cluster.get("status", {}).get("state")
-                if state == "running":
+                if state in ("running", "degraded"):
                     endpoint = cluster.get("endpoint", "")
-                    logger.info(f"K8s кластер {cluster_id} готов. Endpoint: {endpoint}")
-                    return {"success": True, "endpoint": endpoint}
+                    logger.info(f"K8s кластер {cluster_id} готов (state={state!r}). Endpoint: {endpoint}")
+                    return {"success": True, "endpoint": endpoint, "degraded": state == "degraded"}
                 if state == "errored":
                     logger.error(f"K8s кластер {cluster_id} завершился с ошибкой.")
                     return {"success": False, "message": "Cluster errored"}

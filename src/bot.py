@@ -1,3 +1,4 @@
+import io
 import logging
 import re
 from warnings import filterwarnings
@@ -34,6 +35,7 @@ from modules.create_k8s_cluster import (
     get_k8s_cluster,
     get_k8s_versions,
     get_k8s_sizes,
+    get_kubeconfig,
 )
 from modules.authorization import is_authorized, is_authorized_for_bot
 from modules.database import (
@@ -64,6 +66,7 @@ logger = logging.getLogger(__name__)
 
 # --- Constants ---
 NOTIFY_INTERVAL_SECONDS = 43200  # 12 hours
+K8S_POLL_INTERVAL_SECONDS = 30  # poll provisioning clusters every 30s
 CONVERSATION_TIMEOUT = 600  # 10 minutes
 
 DROPLET_NAME_RE = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9._-]{0,253}[a-zA-Z0-9]$")
@@ -1391,8 +1394,12 @@ async def notify_and_check_instances(context: ContextTypes.DEFAULT_TYPE):
         except Exception as e:
             logger.error(f"Ошибка при обработке K8s кластера {cluster}: {e}")
 
-    # --- K8s: provisioning status polling ---
+
+async def poll_provisioning_clusters(context: ContextTypes.DEFAULT_TYPE):
+    """Быстрый поллинг provisioning-кластеров каждые 30 сек. При переходе в running — отправляет kubeconfig."""
     provisioning_clusters = get_provisioning_k8s_clusters()
+    if not provisioning_clusters:
+        return
 
     for cluster in provisioning_clusters:
         try:
@@ -1408,17 +1415,47 @@ async def notify_and_check_instances(context: ContextTypes.DEFAULT_TYPE):
             new_state = status_result.get("status")
             endpoint = status_result.get("endpoint", "")
 
-            if new_state == "running":
-                update_k8s_cluster_status(cluster_id, "running", endpoint=endpoint)
-                logger.info(f"K8s кластер '{cluster_name}' готов. Уведомляем создателя {creator_id}.")
+            logger.info(f"K8s кластер '{cluster_name}' ({cluster_id}): статус DO = {new_state!r}")
+
+            if new_state in ("running", "degraded"):
+                ok = update_k8s_cluster_status(cluster_id, "running", endpoint=endpoint)
+                if not ok:
+                    logger.warning(f"Не удалось обновить статус кластера {cluster_id} в БД")
+                    continue
+                degraded_note = "\n⚠️ Кластер запущен в деградированном состоянии." if new_state == "degraded" else ""
+                logger.info(
+                    f"K8s кластер '{cluster_name}' готов (state={new_state!r}). Получаем kubeconfig и уведомляем {creator_id}."
+                )
+
+                # Fetch kubeconfig
+                kube_result = await get_kubeconfig(DIGITALOCEAN_TOKEN, cluster_id)
+
+                endpoint_line = f"\nEndpoint: <code>{endpoint}</code>" if endpoint else ""
                 try:
-                    endpoint_line = f"\nEndpoint: {endpoint}" if endpoint else ""
                     await context.bot.send_message(
                         chat_id=creator_id,
-                        text=f"K8s кластер **'{cluster_name}'** готов!{endpoint_line}",
+                        text=f"K8s кластер <b>{cluster_name}</b> готов!{endpoint_line}{degraded_note}",
+                        parse_mode="HTML",
                     )
                 except Exception as e:
                     logger.error(f"Ошибка отправки уведомления о готовности кластера {creator_id}: {e}")
+
+                if kube_result["success"]:
+                    try:
+                        kubeconfig_bytes = kube_result["kubeconfig"].encode("utf-8")
+                        await context.bot.send_document(
+                            chat_id=creator_id,
+                            document=io.BytesIO(kubeconfig_bytes),
+                            filename=f"kubeconfig-{cluster_name}.yaml",
+                            caption="Kubeconfig для подключения к кластеру",
+                        )
+                    except Exception as e:
+                        logger.error(f"Ошибка отправки kubeconfig кластера {cluster_id} пользователю {creator_id}: {e}")
+                else:
+                    logger.warning(
+                        f"Не удалось получить kubeconfig для кластера {cluster_id}: {kube_result.get('message')}"
+                    )
+
                 await send_k8s_notification(
                     context.bot,
                     action="ready",
@@ -1431,13 +1468,15 @@ async def notify_and_check_instances(context: ContextTypes.DEFAULT_TYPE):
                     creator_username=cluster.get("creator_username"),
                     endpoint=endpoint,
                 )
+
             elif new_state == "errored":
                 update_k8s_cluster_status(cluster_id, "errored")
                 logger.error(f"K8s кластер '{cluster_name}' завершился с ошибкой.")
                 try:
                     await context.bot.send_message(
                         chat_id=creator_id,
-                        text=f"K8s кластер **'{cluster_name}'** завершился с ошибкой при создании.",
+                        text=f"K8s кластер <b>{cluster_name}</b> завершился с ошибкой при создании.",
+                        parse_mode="HTML",
                     )
                 except Exception as e:
                     logger.error(f"Ошибка отправки уведомления об ошибке кластера {creator_id}: {e}")
@@ -1708,6 +1747,7 @@ def main():
     app.add_error_handler(error_handler)
 
     app.job_queue.run_repeating(notify_and_check_instances, interval=NOTIFY_INTERVAL_SECONDS)
+    app.job_queue.run_repeating(poll_provisioning_clusters, interval=K8S_POLL_INTERVAL_SECONDS)
 
     app.run_polling()
 
