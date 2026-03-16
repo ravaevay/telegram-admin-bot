@@ -7,11 +7,11 @@ from config import DB_PATH
 logger = logging.getLogger(__name__)
 
 
-def _migrate_add_column(conn, col, col_type):
-    """Добавляет колонку в таблицу instances, если она ещё не существует."""
+def _migrate_add_column(conn, table, col, col_type):
+    """Добавляет колонку в таблицу, если она ещё не существует."""
     try:
-        conn.execute(f"ALTER TABLE instances ADD COLUMN {col} {col_type}")
-        logger.info(f"Колонка {col} добавлена в таблицу instances.")
+        conn.execute(f"ALTER TABLE {table} ADD COLUMN {col} {col_type}")
+        logger.info(f"Колонка {col} добавлена в таблицу {table}.")
     except sqlite3.OperationalError:
         pass  # колонка уже существует
 
@@ -19,6 +19,9 @@ def _migrate_add_column(conn, col, col_type):
 def init_db():
     """Инициализация базы данных."""
     with sqlite3.connect(DB_PATH) as connection:
+        # Enable WAL mode for safe concurrent access from multiple bots
+        connection.execute("PRAGMA journal_mode=WAL")
+
         connection.execute("""
         CREATE TABLE IF NOT EXISTS instances (
             droplet_id INTEGER PRIMARY KEY,
@@ -32,12 +35,13 @@ def init_db():
         """)
         connection.commit()
 
-        _migrate_add_column(connection, "creator_username", "TEXT")
-        _migrate_add_column(connection, "domain_name", "TEXT")
-        _migrate_add_column(connection, "dns_record_id", "INTEGER")
-        _migrate_add_column(connection, "dns_zone", "TEXT")
-        _migrate_add_column(connection, "created_at", "TEXT")
-        _migrate_add_column(connection, "price_hourly", "REAL")
+        _migrate_add_column(connection, "instances", "creator_username", "TEXT")
+        _migrate_add_column(connection, "instances", "domain_name", "TEXT")
+        _migrate_add_column(connection, "instances", "dns_record_id", "INTEGER")
+        _migrate_add_column(connection, "instances", "dns_zone", "TEXT")
+        _migrate_add_column(connection, "instances", "created_at", "TEXT")
+        _migrate_add_column(connection, "instances", "price_hourly", "REAL")
+        _migrate_add_column(connection, "instances", "platform", "TEXT DEFAULT 'telegram'")
 
         connection.execute("""
         CREATE TABLE IF NOT EXISTS ssh_key_usage (
@@ -71,6 +75,8 @@ def init_db():
         """)
         connection.commit()
 
+        _migrate_add_column(connection, "k8s_clusters", "platform", "TEXT DEFAULT 'telegram'")
+
     logger.info("База данных инициализирована.")
 
 
@@ -85,6 +91,7 @@ def save_instance(
     creator_username=None,
     created_at=None,
     price_hourly=None,
+    platform="telegram",
 ):
     """Сохранение информации об инстансе в базу данных."""
     try:
@@ -92,8 +99,8 @@ def save_instance(
             connection.execute(
                 """
             INSERT INTO instances (droplet_id, name, ip_address, droplet_type, expiration_date, ssh_key_id, creator_id,
-                                   creator_username, created_at, price_hourly)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                                   creator_username, created_at, price_hourly, platform)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
                 (
                     droplet_id,
@@ -106,6 +113,7 @@ def save_instance(
                     creator_username,
                     created_at,
                     price_hourly,
+                    platform,
                 ),
             )
             connection.commit()
@@ -121,7 +129,7 @@ def get_instance_by_id(droplet_id):
             connection.row_factory = sqlite3.Row
             cursor = connection.execute(
                 "SELECT droplet_id, name, ip_address, droplet_type, expiration_date, ssh_key_id, creator_id, "
-                "creator_username, domain_name, dns_record_id, dns_zone, created_at, price_hourly "
+                "creator_username, domain_name, dns_record_id, dns_zone, created_at, price_hourly, platform "
                 "FROM instances WHERE droplet_id = ?",
                 (droplet_id,),
             )
@@ -141,7 +149,7 @@ def get_instances_by_creator(creator_id):
             connection.row_factory = sqlite3.Row
             cursor = connection.execute(
                 "SELECT droplet_id, name, ip_address, droplet_type, expiration_date, ssh_key_id, creator_id, "
-                "creator_username, domain_name, dns_record_id, dns_zone, created_at, price_hourly "
+                "creator_username, domain_name, dns_record_id, dns_zone, created_at, price_hourly, platform "
                 "FROM instances WHERE creator_id = ? ORDER BY expiration_date",
                 (creator_id,),
             )
@@ -151,18 +159,22 @@ def get_instances_by_creator(creator_id):
         return []
 
 
-def get_expiring_instances():
+def get_expiring_instances(platform=None):
     """Получить инстансы, срок действия которых истекает через 24 часа. Возвращает list[dict]."""
     try:
         with sqlite3.connect(DB_PATH) as connection:
             connection.row_factory = sqlite3.Row
-            cursor = connection.execute("""
-            SELECT droplet_id, name, ip_address, droplet_type, expiration_date, ssh_key_id, creator_id,
-                   creator_username, domain_name, dns_record_id, dns_zone,
-                   created_at, price_hourly
-            FROM instances
-            WHERE expiration_date <= datetime('now', 'localtime', '+1 day')
-            """)
+            query = (
+                "SELECT droplet_id, name, ip_address, droplet_type, expiration_date, ssh_key_id, creator_id, "
+                "creator_username, domain_name, dns_record_id, dns_zone, created_at, price_hourly, platform "
+                "FROM instances "
+                "WHERE expiration_date <= datetime('now', 'localtime', '+1 day')"
+            )
+            params = ()
+            if platform:
+                query += " AND COALESCE(platform, 'telegram') = ?"
+                params = (platform,)
+            cursor = connection.execute(query, params)
             return [dict(row) for row in cursor.fetchall()]
     except sqlite3.Error as e:
         logger.error(f"Ошибка при получении списка инстансов с истекающим сроком действия: {e}")
@@ -287,6 +299,7 @@ def save_k8s_cluster(
     created_at=None,
     price_hourly=None,
     ha=False,
+    platform="telegram",
 ):
     """Сохранение информации о K8s кластере в базу данных."""
     try:
@@ -296,8 +309,8 @@ def save_k8s_cluster(
                 INSERT INTO k8s_clusters (
                     cluster_id, cluster_name, region, version, node_size, node_count,
                     status, endpoint, creator_id, creator_username,
-                    expiration_date, created_at, price_hourly, ha
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    expiration_date, created_at, price_hourly, ha, platform
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     cluster_id,
@@ -314,6 +327,7 @@ def save_k8s_cluster(
                     created_at,
                     price_hourly,
                     1 if ha else 0,
+                    platform,
                 ),
             )
             connection.commit()
@@ -408,30 +422,38 @@ def delete_k8s_cluster(cluster_id):
         return False
 
 
-def get_expiring_k8s_clusters():
+def get_expiring_k8s_clusters(platform=None):
     """Получить K8s кластеры, срок действия которых истекает через 24 часа. Возвращает list[dict]."""
     try:
         with sqlite3.connect(DB_PATH) as connection:
             connection.row_factory = sqlite3.Row
-            cursor = connection.execute("""
-            SELECT * FROM k8s_clusters
-            WHERE status != 'deleted'
-              AND expiration_date <= datetime('now', 'localtime', '+1 day')
-            """)
+            query = (
+                "SELECT * FROM k8s_clusters "
+                "WHERE status != 'deleted' "
+                "AND expiration_date <= datetime('now', 'localtime', '+1 day')"
+            )
+            params = ()
+            if platform:
+                query += " AND COALESCE(platform, 'telegram') = ?"
+                params = (platform,)
+            cursor = connection.execute(query, params)
             return [dict(row) for row in cursor.fetchall()]
     except sqlite3.Error as e:
         logger.error(f"Ошибка при получении K8s кластеров с истекающим сроком: {e}")
         return []
 
 
-def get_provisioning_k8s_clusters():
+def get_provisioning_k8s_clusters(platform=None):
     """Получить K8s кластеры в статусе 'provisioning'. Возвращает list[dict]."""
     try:
         with sqlite3.connect(DB_PATH) as connection:
             connection.row_factory = sqlite3.Row
-            cursor = connection.execute(
-                "SELECT * FROM k8s_clusters WHERE status = 'provisioning'",
-            )
+            query = "SELECT * FROM k8s_clusters WHERE status = 'provisioning'"
+            params = ()
+            if platform:
+                query += " AND COALESCE(platform, 'telegram') = ?"
+                params = (platform,)
+            cursor = connection.execute(query, params)
             return [dict(row) for row in cursor.fetchall()]
     except sqlite3.Error as e:
         logger.error(f"Ошибка при получении provisioning K8s кластеров: {e}")

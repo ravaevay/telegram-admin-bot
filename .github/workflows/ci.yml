@@ -40,6 +40,14 @@ jobs:
       MAIL_DB_USER: "test"
       MAIL_DB_PASSWORD: "test"
       NOTIFICATION_CHANNEL_ID: ""
+      MM_BOT_TOKEN: ""
+      MM_SERVER_URL: ""
+      MM_WEBHOOK_PORT: "8065"
+      MM_WEBHOOK_HOST: "localhost"
+      MM_AUTHORIZED_MAIL_USERS: ""
+      MM_AUTHORIZED_DROPLET_USERS: ""
+      MM_AUTHORIZED_K8S_USERS: ""
+      MM_NOTIFICATION_CHANNEL_ID: ""
     steps:
       - uses: actions/checkout@v4
 

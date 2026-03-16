@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project
 
-Telegram admin bot for managing ONLYOFFICE test infrastructure: mailbox creation/password reset on an iRedMail server via SSH, DigitalOcean droplet lifecycle management (create, extend, auto-delete) with DNS A-record automation, live pricing display, cost tracking, creator tagging, automatic snapshots before expiry deletion, and SSH key preference learning. Also manages DigitalOcean Kubernetes (DOKS) clusters: create, extend, auto-delete, provisioning status polling, and per-user listing. Built with python-telegram-bot 20.3 (async, job-queue) and Python 3.9.
+Telegram admin bot for managing ONLYOFFICE test infrastructure: mailbox creation/password reset on an iRedMail server via SSH, DigitalOcean droplet lifecycle management (create, extend, auto-delete) with DNS A-record automation, live pricing display, cost tracking, creator tagging, automatic snapshots before expiry deletion, and SSH key preference learning. Also manages DigitalOcean Kubernetes (DOKS) clusters: create, extend, auto-delete, provisioning status polling, and per-user listing. Includes a Mattermost bot mirror that runs alongside the Telegram bot, providing the same functionality via DM-based conversations and interactive buttons. Built with python-telegram-bot 20.3 (async, job-queue), mattermostdriver, aiohttp, and Python 3.9.
 
 ## Commands
 
@@ -14,6 +14,9 @@ pip install -r requirements.txt
 
 # Run locally
 python src/bot.py
+
+# Run Mattermost bot locally
+python src/mattermost_bot.py
 
 # Run with Docker
 docker-compose up --build -d
@@ -41,13 +44,13 @@ gh run view <run_id> --log         # full log output
 
 CI/CD: `.github/workflows/ci.yml` — lint + test on push/PR to main; Docker build+push on push to main and `v*.*` / `v*.*.*` tags. Always verify test results via GitHub Actions after pushing, not by running tests locally.
 
-**Testing gotcha:** `config.py` calls `int(os.getenv(...))` at import time. Tests must set env vars (e.g. `AUTHORIZED_MAIL_USERS=1`, `AUTHORIZED_DROPLET_USERS=1`, `AUTHORIZED_K8S_USERS=1`) *before* any `src/` import. This is handled in `tests/conftest.py`.
+**Testing gotcha:** `config.py` calls `int(os.getenv(...))` at import time. Tests must set env vars (e.g. `AUTHORIZED_MAIL_USERS=1`, `AUTHORIZED_DROPLET_USERS=1`, `AUTHORIZED_K8S_USERS=1`) *before* any `src/` import. `MM_*` env vars also need defaults in `conftest.py` (already handled). This is managed in `tests/conftest.py`.
 
 **Database tests:** `database.py` has module-level `DB_PATH`. Tests use `monkeypatch.setattr` to redirect to a temp file via the `tmp_db` fixture.
 
 ## Architecture
 
-**Entry point:** `src/bot.py` — registers all handlers and starts polling.
+**Entry points:** `src/bot.py` — registers all Telegram handlers and starts polling. `src/mattermost_bot.py` — second entry point for the Mattermost bot, runs independently alongside the Telegram bot.
 
 **State machine pattern:** Multi-step user workflows use `ConversationHandler` from python-telegram-bot with states and `context.user_data` to track conversation state. Droplet creation and management conversations use `allow_reentry=True` so users can restart a flow without waiting for the 10-minute timeout.
 
@@ -60,16 +63,27 @@ CI/CD: `.github/workflows/ci.yml` — lint + test on push/PR to main; Docker bui
 
 **K8s creation conversation states (200–204):** `K8S_SELECT_VERSION → K8S_SELECT_NODE_SIZE → K8S_SELECT_NODE_COUNT → K8S_SELECT_DURATION → K8S_INPUT_NAME`. Creates cluster immediately (status `provisioning`); background job polls for `running` state. K8s management states (205–208): `K8S_MANAGE_LIST → K8S_MANAGE_ACTION → K8S_MANAGE_EXTEND / K8S_MANAGE_CONFIRM_DELETE`.
 
-**Background job:** `notify_and_check_instances()` runs every 12 hours via `job_queue`. It warns creators about expiring droplets (within 24h) and auto-deletes expired ones. Before auto-deletion of a droplet, a snapshot is created and the bot waits for it to complete (up to 600s). Also handles K8s clusters: warns/auto-deletes expiring clusters (no snapshot — DOKS doesn't support it), and polls `provisioning` clusters for `running`/`errored` state, notifying the creator when ready.
+**Background job (Telegram):** `notify_and_check_instances()` runs every 12 hours via `job_queue`. It warns creators about expiring droplets (within 24h) and auto-deletes expired ones. Before auto-deletion of a droplet, a snapshot is created and the bot waits for it to complete (up to 600s). Also handles K8s clusters: warns/auto-deletes expiring clusters (no snapshot — DOKS doesn't support it), and polls `provisioning` clusters for `running`/`errored` state, notifying the creator when ready.
+
+**Mattermost bot architecture:**
+- Uses `mattermostdriver.Driver` (sync) for REST API, wrapped with `asyncio.to_thread()` for async compatibility
+- WebSocket connection via `aiohttp` for real-time events (DM messages)
+- `aiohttp` HTTP server on `MM_WEBHOOK_PORT` for interactive button callbacks
+- `ConversationManager` (in-memory state machine) replaces Telegram's `ConversationHandler`
+- Commands via `!start` and `!cancel` in DMs; subsequent steps via interactive buttons
+- Background jobs: `asyncio.create_task` loops for instance expiry (12h), K8s provisioning poll (30s), conversation cleanup (5min)
+- Only processes `platform='mattermost'` records in background jobs
 
 **Modules:**
 - `config.py` — loads `.env` via python-dotenv, builds `SSH_CONFIG` dict and `AUTHORIZED_GROUPS` dict (keyed by `"mail"`, `"droplet"`, `"k8s"`)
 - `modules/authorization.py` — `is_authorized(user_id, module)` checks against `AUTHORIZED_GROUPS`; `is_authorized_for_bot(user_id)` returns `True` if user belongs to any group (used by `/start`)
-- `modules/database.py` — SQLite CRUD for three tables: `instances` (droplets), `ssh_key_usage` (per-user SSH key preferences), and `k8s_clusters` (cluster_id TEXT PK, cluster_name, region, version, node_size, node_count, status, endpoint, creator_id, creator_username, expiration_date, created_at, price_hourly, ha). Schema migrations via `_migrate_add_column()`. K8s functions: `save_k8s_cluster()`, `get_k8s_cluster_by_id/name()`, `get_k8s_clusters_by_creator()`, `update_k8s_cluster_status()`, `delete_k8s_cluster()`, `get_expiring_k8s_clusters()`, `get_provisioning_k8s_clusters()`, `extend_k8s_cluster_expiration()`.
+- `modules/database.py` — SQLite CRUD for three tables: `instances` (droplets), `ssh_key_usage` (per-user SSH key preferences), and `k8s_clusters` (cluster_id TEXT PK, cluster_name, region, version, node_size, node_count, status, endpoint, creator_id, creator_username, expiration_date, created_at, price_hourly, ha). Schema migrations via `_migrate_add_column()`. Both `instances` and `k8s_clusters` have a `platform` column (`TEXT DEFAULT 'telegram'`) to distinguish records created by each bot. WAL mode is enabled for safe concurrent access from both bots. `save_instance()` and `save_k8s_cluster()` accept a `platform` parameter. `get_expiring_instances()`, `get_expiring_k8s_clusters()`, and `get_provisioning_k8s_clusters()` accept an optional `platform` filter. K8s functions: `save_k8s_cluster()`, `get_k8s_cluster_by_id/name()`, `get_k8s_clusters_by_creator()`, `update_k8s_cluster_status()`, `delete_k8s_cluster()`, `get_expiring_k8s_clusters()`, `get_provisioning_k8s_clusters()`, `extend_k8s_cluster_expiration()`.
 - `modules/mail.py` — Paramiko SSH to mail server, runs Python scripts inside `onlyoffice-mail-server` Docker container for mailbox creation/password reset
 - `modules/create_test_instance.py` — DigitalOcean REST API calls (create/delete droplets, list SSH keys/images, DNS record management, size/pricing with 1h TTL cache, snapshot creation with action polling, creator tagging via `_sanitize_tag()`). Droplets created in `fra1` region.
 - `modules/create_k8s_cluster.py` — DigitalOcean DOKS API layer: `create_k8s_cluster()` (returns immediately, status=`provisioning`), `delete_k8s_cluster()`, `get_k8s_cluster()`, `get_k8s_versions()`, `get_k8s_sizes()` (both cached via `_get_k8s_options()` with 1h TTL), `wait_for_cluster_ready()` (polling), `get_kubeconfig()`. Retry logic via `_do_request_with_retry()`: 429 → Retry-After, 5xx → exp backoff, timeout → retry, 4xx → raise immediately.
 - `modules/notifications.py` — Sends event notifications to a Telegram channel. `send_notification()` for droplets (created/extended/deleted/auto_deleted/snapshot_created). `send_k8s_notification()` for clusters (created/ready/extended/deleted/auto_deleted/errored).
+- `modules/mm_conversation.py` — `ConversationManager` in-memory state machine (replaces Telegram's `ConversationHandler`): `ConversationState`, `start()`, `get()`, `end()`, `cleanup_expired()`, 10-min timeout.
+- `modules/mm_notifications.py` — mirrors `notifications.py` for Mattermost: `send_notification()`, `send_k8s_notification()` posting to `MM_NOTIFICATION_CHANNEL_ID` via driver.
 
 **Stale callback queries:** Telegram callback queries expire after ~30s. All standalone `CallbackQueryHandler`s (extend/delete) wrap `query.answer()` in `try/except BadRequest: pass` to avoid crashes on stale buttons.
 
@@ -79,7 +93,7 @@ CI/CD: `.github/workflows/ci.yml` — lint + test on push/PR to main; Docker bui
 
 Required: `BOT_TOKEN`, `SSH_HOST`, `SSH_PORT`, `SSH_USERNAME`, `SSH_KEY_PATH`, `DIGITALOCEAN_TOKEN`, `AUTHORIZED_MAIL_USERS` (comma-separated user IDs), `AUTHORIZED_DROPLET_USERS` (comma-separated user IDs), `MAIL_DEFAULT_DOMAIN`, `MAIL_DB_USER`, `MAIL_DB_PASSWORD`.
 
-Optional: `AUTHORIZED_K8S_USERS` (comma-separated user IDs; if empty, K8s features are inaccessible but the bot still starts), `NOTIFICATION_CHANNEL_ID` (Telegram channel for droplet and K8s event notifications), `DB_PATH` (default `./instances.db`).
+Optional: `AUTHORIZED_K8S_USERS` (comma-separated user IDs; if empty, K8s features are inaccessible but the bot still starts), `NOTIFICATION_CHANNEL_ID` (Telegram channel for droplet and K8s event notifications), `DB_PATH` (default `./instances.db`), `MM_BOT_TOKEN` (Mattermost bot personal access token; required for MM bot), `MM_SERVER_URL` (Mattermost server URL; required for MM bot), `MM_WEBHOOK_PORT` (default 8065, for button callback HTTP server), `MM_WEBHOOK_HOST` (default localhost, hostname for callback URLs), `MM_AUTHORIZED_MAIL_USERS`, `MM_AUTHORIZED_DROPLET_USERS`, `MM_AUTHORIZED_K8S_USERS` (comma-separated MM user IDs), `MM_NOTIFICATION_CHANNEL_ID` (MM channel for event notifications).
 
 ## Git Workflow
 
