@@ -1,5 +1,5 @@
 import logging
-from config import AUTHORIZED_GROUPS
+from config import AUTHORIZED_GROUPS, MM_AUTHORIZED_GROUPS
 
 logger = logging.getLogger(__name__)
 
@@ -17,4 +17,20 @@ def is_authorized_for_bot(user_id):
     if any(user_id in users for users in AUTHORIZED_GROUPS.values()):
         return True
     logger.warning(f"Пользователь {user_id} не авторизован для работы с ботом.")
+    return False
+
+
+def mm_is_authorized(user_id, module):
+    """Проверка авторизации Mattermost-пользователя для модуля."""
+    if user_id in MM_AUTHORIZED_GROUPS.get(module, []):
+        return True
+    logger.warning(f"MM пользователь {user_id} не авторизован для модуля {module}.")
+    return False
+
+
+def mm_is_authorized_for_bot(user_id):
+    """Проверка авторизации Mattermost-пользователя для работы с ботом."""
+    if any(user_id in users for users in MM_AUTHORIZED_GROUPS.values()):
+        return True
+    logger.warning(f"MM пользователь {user_id} не авторизован для работы с ботом.")
     return False

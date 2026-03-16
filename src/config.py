@@ -28,3 +28,17 @@ NOTIFICATION_CHANNEL_ID = os.getenv("NOTIFICATION_CHANNEL_ID")
 MAIL_DEFAULT_DOMAIN = os.getenv("MAIL_DEFAULT_DOMAIN")
 MAIL_DB_USER = os.getenv("MAIL_DB_USER")
 MAIL_DB_PASSWORD = os.getenv("MAIL_DB_PASSWORD")
+
+# Mattermost
+MM_BOT_TOKEN = os.getenv("MM_BOT_TOKEN")
+MM_SERVER_URL = os.getenv("MM_SERVER_URL")  # e.g. "https://mm.example.com"
+MM_WEBHOOK_PORT = int(os.getenv("MM_WEBHOOK_PORT", "8065"))
+MM_WEBHOOK_HOST = os.getenv("MM_WEBHOOK_HOST", "localhost")
+
+MM_AUTHORIZED_GROUPS = {
+    "mail": [x.strip() for x in os.getenv("MM_AUTHORIZED_MAIL_USERS", "").split(",") if x.strip()],
+    "droplet": [x.strip() for x in os.getenv("MM_AUTHORIZED_DROPLET_USERS", "").split(",") if x.strip()],
+    "k8s": [x.strip() for x in os.getenv("MM_AUTHORIZED_K8S_USERS", "").split(",") if x.strip()],
+}
+
+MM_NOTIFICATION_CHANNEL_ID = os.getenv("MM_NOTIFICATION_CHANNEL_ID")
