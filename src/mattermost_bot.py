@@ -1792,12 +1792,12 @@ async def main():
             "timeout": 30,
         }
     )
+    await mm_api(driver.login)
     # Set User-Agent to pass CloudFront WAF (blocks default python-requests UA)
     driver.client.session.headers["User-Agent"] = "MattermostAdminBot/1.0 (mattermostdriver)"
     driver.client.session.headers["Accept"] = "application/json"
     # Ensure Authorization header is set for token-based auth
     driver.client.session.headers["Authorization"] = f"Bearer {MM_BOT_TOKEN}"
-    await mm_api(driver.login)
     bot_info = await mm_api(driver.users.get_user, "me")
     bot_user_id = bot_info["id"]
     logger.info(f"Mattermost бот авторизован: {bot_info['username']} (ID: {bot_user_id})")
