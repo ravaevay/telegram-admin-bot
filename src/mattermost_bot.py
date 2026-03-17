@@ -325,9 +325,12 @@ async def route_text_input(user_id, channel_id, text):
 
 async def handle_action(request):
     """Handle Mattermost interactive message button callbacks."""
+    logger.info(f"Action callback received: content_type={request.content_type}, method={request.method}")
     try:
         data = await request.json()
     except Exception:
+        body = await request.text()
+        logger.error(f"Failed to parse action body: {body[:500]}")
         return web.json_response({"error": "invalid json"}, status=400)
 
     user_id = data.get("user_id", "")
@@ -1789,6 +1792,11 @@ async def main():
             "timeout": 30,
         }
     )
+    # Set User-Agent to pass CloudFront WAF (blocks default python-requests UA)
+    driver.client.session.headers["User-Agent"] = "MattermostAdminBot/1.0 (mattermostdriver)"
+    driver.client.session.headers["Accept"] = "application/json"
+    # Ensure Authorization header is set for token-based auth
+    driver.client.session.headers["Authorization"] = f"Bearer {MM_BOT_TOKEN}"
     await mm_api(driver.login)
     bot_info = await mm_api(driver.users.get_user, "me")
     bot_user_id = bot_info["id"]
