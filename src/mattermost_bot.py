@@ -160,6 +160,7 @@ async def post_with_buttons(channel_id, text, buttons):
         actions.append(
             {
                 "id": btn["id"],
+                "type": "button",
                 "name": btn["name"],
                 "integration": {
                     "url": f"http://{MM_WEBHOOK_HOST}:{MM_WEBHOOK_PORT}/actions",
