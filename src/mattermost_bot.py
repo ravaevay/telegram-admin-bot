@@ -169,7 +169,17 @@ async def post_with_buttons(channel_id, text, buttons):
             }
         )
     props = {"attachments": [{"text": text, "actions": actions}]}
-    return await post_message(channel_id, "", props=props)
+    logger.debug(f"post_with_buttons payload: {json.dumps(props, indent=2)}")
+    result = await post_message(channel_id, "", props=props)
+    # Check if Mattermost stored the actions
+    stored_props = result.get("props", {}) if isinstance(result, dict) else {}
+    stored_attachments = stored_props.get("attachments")
+    logger.info(f"post_with_buttons response props: {json.dumps(stored_props)}")
+    if stored_attachments:
+        att = json.loads(stored_attachments) if isinstance(stored_attachments, str) else stored_attachments
+        has_actions = any(a.get("actions") for a in att) if isinstance(att, list) else False
+        logger.info(f"post_with_buttons: actions stored by server: {has_actions}")
+    return result
 
 
 async def get_dm_channel(user_id):
