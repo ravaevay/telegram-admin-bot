@@ -150,6 +150,15 @@ async def update_post(post_id, text, props=None):
     return await mm_api(driver.posts.update_post, post_id, options)
 
 
+def _sanitize_action_id(raw_id):
+    """Strip non-alphanumeric chars from action ID.
+
+    Mattermost route uses regex [A-Za-z0-9]+ for action_id,
+    so underscores, hyphens, dots etc. cause 404.
+    """
+    return re.sub(r"[^A-Za-z0-9]", "", raw_id)
+
+
 async def post_with_buttons(channel_id, text, buttons):
     """Post a message with interactive buttons.
 
@@ -159,7 +168,7 @@ async def post_with_buttons(channel_id, text, buttons):
     for btn in buttons:
         actions.append(
             {
-                "id": btn["id"],
+                "id": _sanitize_action_id(btn["id"]),
                 "type": "button",
                 "name": btn["name"],
                 "integration": {
