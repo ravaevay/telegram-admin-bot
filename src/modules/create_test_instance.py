@@ -158,6 +158,19 @@ async def get_sizes(token):
         return {}
 
 
+def build_stand_user_data(service, ds_tag="latest", service_tag="latest", domain_name=None):
+    """Build cloud-config user-data for test stand deployment (services4integration)."""
+    cmd = f"bash /app/{service}/install.sh -st {service_tag} -dt {ds_tag}"
+    if domain_name:
+        cmd += f" -dn {domain_name}"
+    return (
+        "#cloud-config\n"
+        "runcmd:\n"
+        f"  - git clone -b master https://github.com/ONLYOFFICE/services4integration.git --depth=1 /app\n"
+        f"  - {cmd}\n"
+    )
+
+
 async def create_droplet(
     token,
     name,
@@ -170,6 +183,8 @@ async def create_droplet(
     price_monthly=None,
     creator_tag=None,
     price_hourly=None,
+    user_data=None,
+    stand_type=None,
 ):
     """Создаёт Droplet в DigitalOcean."""
     try:
@@ -184,15 +199,19 @@ async def create_droplet(
             "ipv6": False,
             "monitoring": True,
         }
+        if user_data:
+            payload["user_data"] = user_data
         tags = ["createdby:telegram-admin-bot"]
         if creator_tag:
             tags.append(f"creator:{_sanitize_tag(creator_tag)}")
+        if stand_type:
+            tags.append("connectors")
         payload["tags"] = tags
 
         headers = {**_auth_headers(token), "Content-Type": "application/json"}
 
         async with httpx.AsyncClient(headers=headers) as client:
-            # Создание инстанса
+            # Create droplet
             response = await client.post(BASE_URL + "droplets", json=payload)
             response.raise_for_status()
 
@@ -200,7 +219,7 @@ async def create_droplet(
             droplet_id = droplet.get("id")
             droplet_name = droplet.get("name")
 
-            # Ожидание настройки IP (async — не блокирует event loop)
+            # Poll for IP address (async — does not block event loop)
             ip_address = None
             for _ in range(IP_POLL_ATTEMPTS):
                 response = await client.get(BASE_URL + f"droplets/{droplet_id}")
@@ -214,7 +233,7 @@ async def create_droplet(
         if not ip_address:
             ip_address = "Не удалось получить IP-адрес"
 
-        # Сохраняем данные в БД
+        # Save to database
         created_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         key_ids = ssh_key_ids if isinstance(ssh_key_ids, list) else [ssh_key_ids]
         save_instance(
@@ -228,6 +247,7 @@ async def create_droplet(
             creator_username,
             created_at=created_at,
             price_hourly=price_hourly,
+            stand_type=stand_type,
         )
         logger.info(f"Инстанс {name} создан. ID: {droplet_id}, IP: {ip_address}, срок действия до {expiration_date}")
 
@@ -259,7 +279,7 @@ async def create_droplet(
 async def delete_droplet(token, droplet_id, dns_zone=None, dns_record_id=None):
     """Удаляет Droplet из DigitalOcean и запись из базы данных."""
     try:
-        # Удаление DNS-записи (если указана)
+        # Delete DNS record (if present)
         if dns_zone and dns_record_id:
             dns_result = await delete_dns_record(token, dns_zone, dns_record_id)
             if not dns_result["success"]:
@@ -271,7 +291,7 @@ async def delete_droplet(token, droplet_id, dns_zone=None, dns_record_id=None):
             response = await client.delete(f"{BASE_URL}droplets/{droplet_id}")
             response.raise_for_status()
 
-        # Удаление из базы данных
+        # Delete from database
         delete_instance(droplet_id)
         logger.info(f"Инстанс ID {droplet_id} успешно удалён из DigitalOcean и базы данных.")
 

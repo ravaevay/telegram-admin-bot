@@ -25,6 +25,7 @@ async def send_notification(
     creator_username=None,
     domain_name=None,
     price_monthly=None,
+    stand_type=None,
 ):
     """Send notification to the MM channel about droplet events."""
     if not MM_NOTIFICATION_CHANNEL_ID:
@@ -38,11 +39,13 @@ async def send_notification(
         if action == "created":
             dns_line = f"DNS: {domain_name}\n" if domain_name else ""
             cost_line = f"Стоимость: ~${price_monthly}/мес\n" if price_monthly else ""
+            stand_line = f"Тестовый стенд: {stand_type}\n" if stand_type else ""
             text = (
                 f"**Новый инстанс создан**\n\n"
                 f"Имя: {droplet_name}\n"
                 f"IP: {ip_address}\n"
                 f"{dns_line}"
+                f"{stand_line}"
                 f"Тип: {type_label}\n"
                 f"{cost_line}"
                 f"Срок действия: {expiration_date}\n"
