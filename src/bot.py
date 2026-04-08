@@ -354,7 +354,7 @@ async def droplet_select_image(update: Update, context: ContextTypes.DEFAULT_TYP
     image_id = query.data.removeprefix("image_")
     context.user_data["image"] = image_id
 
-    # Попытка получить список доменов для DNS
+    # Try to get DNS domains list
     result = await get_domains(DIGITALOCEAN_TOKEN)
     if result["success"] and result["domains"]:
         keyboard = [[InlineKeyboardButton(domain, callback_data=f"dns_zone_{domain}")] for domain in result["domains"]]
@@ -363,7 +363,7 @@ async def droplet_select_image(update: Update, context: ContextTypes.DEFAULT_TYP
         await query.message.reply_text("Выберите DNS-зону для создания записи:", reply_markup=reply_markup)
         return SELECT_DNS_ZONE
 
-    # Нет доменов или ошибка — пропускаем DNS, переходим к выбору типа
+    # No domains or error — skip DNS, proceed to type selection
     context.user_data["dns_zone"] = None
     context.user_data["subdomain"] = None
     return await _show_droplet_type_keyboard(query.message)
@@ -426,7 +426,7 @@ async def droplet_select_type(update: Update, context: ContextTypes.DEFAULT_TYPE
     droplet_type = query.data.removeprefix("droplet_type_")
     context.user_data["droplet_type"] = droplet_type
 
-    # Получаем цены для расчёта стоимости по длительности
+    # Fetch prices for duration cost estimates
     sizes = await get_sizes(DIGITALOCEAN_TOKEN)
     price_info = sizes.get(droplet_type)
     if price_info:
@@ -468,7 +468,7 @@ async def droplet_select_duration(update: Update, context: ContextTypes.DEFAULT_
     duration = int(query.data.removeprefix("duration_"))
     context.user_data["duration"] = duration
 
-    # Если выбран DNS, используем FQDN как имя дроплета
+    # If DNS is set, use FQDN as droplet name
     dns_zone = context.user_data.get("dns_zone")
     subdomain = context.user_data.get("subdomain")
     if dns_zone and subdomain:
@@ -516,7 +516,7 @@ async def _create_droplet_and_respond(message, user, context, droplet_name) -> i
 
     domain_name = None
     if result["success"]:
-        # Создание DNS-записи (если указаны зона и субдомен)
+        # Create DNS record (if zone and subdomain are set)
         dns_zone = data.get("dns_zone")
         subdomain = data.get("subdomain")
         if dns_zone and subdomain:
@@ -529,7 +529,7 @@ async def _create_droplet_and_respond(message, user, context, droplet_name) -> i
                     dns_result["record_id"],
                     dns_zone,
                 )
-                # Дополняем сообщение информацией о DNS
+                # Append DNS info to the message
                 result["message"] += f"\nDNS: `{domain_name}`"
             else:
                 await message.reply_text(f"Инстанс создан, но DNS-запись не удалось создать: {dns_result['message']}")
@@ -711,7 +711,7 @@ async def _show_droplet_list(message, user_id) -> int:
         type_label = DROPLET_TYPES.get(inst["droplet_type"], inst["droplet_type"])
         dns_line = f"DNS: {inst['domain_name']}\n" if inst.get("domain_name") else ""
 
-        # Расчёт потраченных средств
+        # Calculate cost spent
         cost_line = ""
         if inst.get("created_at") and inst.get("price_hourly"):
             try:
@@ -1307,7 +1307,7 @@ async def stand_ds_tag_choice(update: Update, context: ContextTypes.DEFAULT_TYPE
         context.user_data["stand_ds_tag"] = STAND_DEFAULT_DS_TAG
         return await _stand_show_ssh_keys(query, context)
 
-    # stand_ds_custom — запросить текстовый ввод
+    # stand_ds_custom — ask for text input
     await query.message.reply_text("Введите версию Document Server (например, 8.0.1):")
     return STAND_SELECT_DS_TAG
 
@@ -1321,7 +1321,7 @@ async def stand_input_ds_tag(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
     context.user_data["stand_ds_tag"] = ds_tag
 
-    # Для текстового ввода у нас нет query, создаём фиктивный вызов через message
+    # Text input has no callback query, respond via message
     user_id = update.effective_user.id
     result = await get_ssh_keys(DIGITALOCEAN_TOKEN)
     if not result["success"]:
@@ -1451,7 +1451,7 @@ async def _stand_show_dns_zones(message) -> int:
         await message.reply_text("Выберите DNS-зону для создания записи:", reply_markup=reply_markup)
         return STAND_SELECT_DNS_ZONE
 
-    # Нет доменов или ошибка — пропускаем DNS, переходим к выбору типа
+    # No domains or error — skip DNS, proceed to type selection
     return await _stand_show_type_keyboard(message)
 
 
@@ -1587,7 +1587,7 @@ async def _create_stand(message, user, context, droplet_name) -> int:
     service = data["stand_service"]
     ds_tag = data.get("stand_ds_tag", STAND_DEFAULT_DS_TAG)
 
-    # Определяем domain_name для cloud-init (FQDN или None)
+    # Determine domain_name for cloud-init (FQDN or None)
     dns_zone = data.get("dns_zone")
     subdomain = data.get("subdomain")
     fqdn = f"{subdomain}.{dns_zone}" if dns_zone and subdomain else None
@@ -1612,7 +1612,7 @@ async def _create_stand(message, user, context, droplet_name) -> int:
 
     domain_name = None
     if result["success"]:
-        # Создание DNS-записи (если указаны зона и субдомен)
+        # Create DNS record (if zone and subdomain are set)
         if dns_zone and subdomain:
             dns_result = await create_dns_record(DIGITALOCEAN_TOKEN, dns_zone, subdomain, result["ip_address"])
             if dns_result["success"]:
@@ -1629,7 +1629,7 @@ async def _create_stand(message, user, context, droplet_name) -> int:
 
         record_ssh_key_usage(user_id, data["ssh_key_ids"])
 
-        # Добавляем примечание о времени установки
+        # Append setup time note
         result["message"] += "\n\nНастройка стенда займёт 5\\-15 минут после загрузки VM\\."
 
         await message.reply_text(result["message"], parse_mode="MarkdownV2")
@@ -1707,7 +1707,7 @@ async def notify_and_check_instances(context: ContextTypes.DEFAULT_TYPE):
             elif time_left <= 0:
                 logger.info(f"Инстанс '{name}' с ID {droplet_id} должен быть удалён. Создаём снэпшот...")
 
-                # Создание снэпшота перед удалением
+                # Create snapshot before deletion
                 snapshot_date = datetime.now().strftime("%Y%m%d")
                 snapshot_name = f"{name}-expired-{snapshot_date}"
                 try:
@@ -1740,7 +1740,7 @@ async def notify_and_check_instances(context: ContextTypes.DEFAULT_TYPE):
                 except Exception as e:
                     logger.warning(f"Ошибка снэпшота для дроплета {droplet_id}: {e}. Продолжаем удаление.")
 
-                # Удаление дроплета
+                # Delete droplet
                 delete_result = await delete_droplet(
                     DIGITALOCEAN_TOKEN,
                     droplet_id,

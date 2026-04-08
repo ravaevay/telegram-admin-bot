@@ -211,7 +211,7 @@ async def create_droplet(
         headers = {**_auth_headers(token), "Content-Type": "application/json"}
 
         async with httpx.AsyncClient(headers=headers) as client:
-            # Создание инстанса
+            # Create droplet
             response = await client.post(BASE_URL + "droplets", json=payload)
             response.raise_for_status()
 
@@ -219,7 +219,7 @@ async def create_droplet(
             droplet_id = droplet.get("id")
             droplet_name = droplet.get("name")
 
-            # Ожидание настройки IP (async — не блокирует event loop)
+            # Poll for IP address (async — does not block event loop)
             ip_address = None
             for _ in range(IP_POLL_ATTEMPTS):
                 response = await client.get(BASE_URL + f"droplets/{droplet_id}")
@@ -233,7 +233,7 @@ async def create_droplet(
         if not ip_address:
             ip_address = "Не удалось получить IP-адрес"
 
-        # Сохраняем данные в БД
+        # Save to database
         created_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         key_ids = ssh_key_ids if isinstance(ssh_key_ids, list) else [ssh_key_ids]
         save_instance(
@@ -279,7 +279,7 @@ async def create_droplet(
 async def delete_droplet(token, droplet_id, dns_zone=None, dns_record_id=None):
     """Удаляет Droplet из DigitalOcean и запись из базы данных."""
     try:
-        # Удаление DNS-записи (если указана)
+        # Delete DNS record (if present)
         if dns_zone and dns_record_id:
             dns_result = await delete_dns_record(token, dns_zone, dns_record_id)
             if not dns_result["success"]:
@@ -291,7 +291,7 @@ async def delete_droplet(token, droplet_id, dns_zone=None, dns_record_id=None):
             response = await client.delete(f"{BASE_URL}droplets/{droplet_id}")
             response.raise_for_status()
 
-        # Удаление из базы данных
+        # Delete from database
         delete_instance(droplet_id)
         logger.info(f"Инстанс ID {droplet_id} успешно удалён из DigitalOcean и базы данных.")
 
