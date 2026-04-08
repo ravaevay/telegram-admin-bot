@@ -19,6 +19,7 @@ AUTHORIZED_GROUPS = {
     "mail": list(map(int, os.getenv("AUTHORIZED_MAIL_USERS", "").split(","))),
     "droplet": list(map(int, os.getenv("AUTHORIZED_DROPLET_USERS", "").split(","))),
     "k8s": [int(x) for x in os.getenv("AUTHORIZED_K8S_USERS", "").split(",") if x.strip()],
+    "stand": [int(x) for x in os.getenv("AUTHORIZED_STAND_USERS", "").split(",") if x.strip()],
 }
 
 DB_PATH = os.getenv("DB_PATH", "./instances.db")
@@ -39,6 +40,27 @@ MM_AUTHORIZED_GROUPS = {
     "mail": [x.strip() for x in os.getenv("MM_AUTHORIZED_MAIL_USERS", "").split(",") if x.strip()],
     "droplet": [x.strip() for x in os.getenv("MM_AUTHORIZED_DROPLET_USERS", "").split(",") if x.strip()],
     "k8s": [x.strip() for x in os.getenv("MM_AUTHORIZED_K8S_USERS", "").split(",") if x.strip()],
+    "stand": [x.strip() for x in os.getenv("MM_AUTHORIZED_STAND_USERS", "").split(",") if x.strip()],
 }
 
 MM_NOTIFICATION_CHANNEL_ID = os.getenv("MM_NOTIFICATION_CHANNEL_ID")
+
+# Test stands (services4integration)
+STAND_SERVICES = [
+    s.strip()
+    for s in os.getenv(
+        "STAND_SERVICES",
+        "nextcloud,wordpress,moodle,drupal,confluence,jira,humhub,"
+        "chamilo,redmine,owncloud,plone,strapi,alfresco,nuxeo,"
+        "liferay,odoo,suitecrm,seafile,documentserver",
+    ).split(",")
+    if s.strip()
+]
+
+STAND_DEFAULT_DS_TAG = os.getenv("STAND_DEFAULT_DS_TAG", "latest")
+STAND_DEFAULT_IMAGE = os.getenv("STAND_DEFAULT_IMAGE", "ubuntu-20-04-x64")
+
+STAND_DROPLET_TYPES = {
+    "s-2vcpu-4gb": "4GB-2vCPU-80GB",
+    "s-4vcpu-8gb": "8GB-4vCPU-160GB",
+}

@@ -158,6 +158,19 @@ async def get_sizes(token):
         return {}
 
 
+def build_stand_user_data(service, ds_tag="latest", service_tag="latest", domain_name=None):
+    """Build cloud-config user-data for test stand deployment (services4integration)."""
+    cmd = f"bash /app/{service}/install.sh -st {service_tag} -dt {ds_tag}"
+    if domain_name:
+        cmd += f" -dn {domain_name}"
+    return (
+        "#cloud-config\n"
+        "runcmd:\n"
+        f"  - git clone -b master https://github.com/ONLYOFFICE/services4integration.git --depth=1 /app\n"
+        f"  - {cmd}\n"
+    )
+
+
 async def create_droplet(
     token,
     name,
@@ -170,6 +183,8 @@ async def create_droplet(
     price_monthly=None,
     creator_tag=None,
     price_hourly=None,
+    user_data=None,
+    stand_type=None,
 ):
     """Создаёт Droplet в DigitalOcean."""
     try:
@@ -184,9 +199,13 @@ async def create_droplet(
             "ipv6": False,
             "monitoring": True,
         }
+        if user_data:
+            payload["user_data"] = user_data
         tags = ["createdby:telegram-admin-bot"]
         if creator_tag:
             tags.append(f"creator:{_sanitize_tag(creator_tag)}")
+        if stand_type:
+            tags.append("connectors")
         payload["tags"] = tags
 
         headers = {**_auth_headers(token), "Content-Type": "application/json"}
@@ -228,6 +247,7 @@ async def create_droplet(
             creator_username,
             created_at=created_at,
             price_hourly=price_hourly,
+            stand_type=stand_type,
         )
         logger.info(f"Инстанс {name} создан. ID: {droplet_id}, IP: {ip_address}, срок действия до {expiration_date}")
 

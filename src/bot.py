@@ -16,7 +16,15 @@ from telegram.ext import (
 )
 from telegram.warnings import PTBUserWarning
 
-from config import BOT_TOKEN, SSH_CONFIG, DIGITALOCEAN_TOKEN
+from config import (
+    BOT_TOKEN,
+    SSH_CONFIG,
+    DIGITALOCEAN_TOKEN,
+    STAND_SERVICES,
+    STAND_DEFAULT_DS_TAG,
+    STAND_DEFAULT_IMAGE,
+    STAND_DROPLET_TYPES,
+)
 from modules.create_test_instance import (
     create_droplet,
     create_snapshot,
@@ -27,6 +35,7 @@ from modules.create_test_instance import (
     create_dns_record,
     delete_droplet,
     wait_for_action,
+    build_stand_user_data,
     DROPLET_TYPES,
 )
 from modules.create_k8s_cluster import (
@@ -79,6 +88,16 @@ SELECT_SSH_KEY, SELECT_IMAGE, SELECT_DNS_ZONE, INPUT_SUBDOMAIN, SELECT_TYPE, SEL
 MANAGE_LIST, MANAGE_ACTION, MANAGE_EXTEND, MANAGE_CONFIRM_DELETE = range(100, 104)
 K8S_SELECT_VERSION, K8S_SELECT_NODE_SIZE, K8S_SELECT_NODE_COUNT, K8S_SELECT_DURATION, K8S_INPUT_NAME = range(200, 205)
 K8S_MANAGE_LIST, K8S_MANAGE_ACTION, K8S_MANAGE_EXTEND, K8S_MANAGE_CONFIRM_DELETE = range(205, 209)
+(
+    STAND_SELECT_SERVICE,
+    STAND_SELECT_DS_TAG,
+    STAND_SELECT_SSH_KEY,
+    STAND_SELECT_DNS_ZONE,
+    STAND_INPUT_SUBDOMAIN,
+    STAND_SELECT_TYPE,
+    STAND_SELECT_DURATION,
+    STAND_INPUT_NAME,
+) = range(300, 308)
 
 # Track users who initiated /start in group chats
 allowed_users = set()
@@ -109,6 +128,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         [InlineKeyboardButton("Управление инстансами", callback_data="manage_droplets")],
         [InlineKeyboardButton("☸️ Создать K8s кластер", callback_data="create_k8s")],
         [InlineKeyboardButton("☸️ Мои K8s кластеры", callback_data="manage_k8s")],
+        [InlineKeyboardButton("🔧 Создать тестовый стенд", callback_data="create_stand")],
     ]
     reply_markup = InlineKeyboardMarkup(keyboard)
     await update.message.reply_text("Добро пожаловать! Выберите действие:", reply_markup=reply_markup)
@@ -702,11 +722,14 @@ async def _show_droplet_list(message, user_id) -> int:
             except (ValueError, TypeError):
                 pass
 
+        stand_line = f"Стенд: {inst['stand_type']}\n" if inst.get("stand_type") else ""
+
         text = (
             f"Имя: {inst['name']}\n"
             f"IP: {inst['ip_address']}\n"
             f"{dns_line}"
             f"Тип: {type_label}\n"
+            f"{stand_line}"
             f"{cost_line}"
             f"Срок действия: {inst['expiration_date']}"
         )
@@ -1212,6 +1235,420 @@ async def k8s_manage_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) 
     query = update.callback_query
     await query.answer()
     await query.message.reply_text("Удаление отменено.")
+    context.user_data.clear()
+    return ConversationHandler.END
+
+
+# --- Test stand creation conversation ---
+
+
+def _build_stand_ssh_key_keyboard(keys, selected_ids, expanded):
+    """Построить inline-клавиатуру для мультивыбора SSH-ключей (стенд)."""
+    visible_keys = keys if expanded or len(keys) <= 3 else keys[:3]
+    keyboard = []
+    for key in visible_keys:
+        key_id = str(key["id"])
+        prefix = "✅" if key_id in selected_ids else "⬜"
+        keyboard.append([InlineKeyboardButton(f"{prefix} {key['name']}", callback_data=f"stand_ssh_toggle_{key_id}")])
+
+    if not expanded and len(keys) > 3:
+        remaining = len(keys) - 3
+        keyboard.append([InlineKeyboardButton(f"Другие ключи ({remaining})", callback_data="stand_ssh_more_keys")])
+
+    count = len(selected_ids)
+    keyboard.append([InlineKeyboardButton(f"Продолжить ✓ ({count})", callback_data="stand_ssh_confirm")])
+    return InlineKeyboardMarkup(keyboard)
+
+
+async def stand_entry(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Начало создания тестового стенда — выбор сервиса."""
+    query = update.callback_query
+    user_id = query.from_user.id
+
+    if not _check_group_access(update, user_id):
+        await query.answer("У вас нет доступа к этой кнопке.", show_alert=True)
+        return ConversationHandler.END
+
+    await query.answer()
+
+    if not is_authorized(user_id, "stand"):
+        await query.message.reply_text("У вас нет прав для создания тестовых стендов.")
+        return ConversationHandler.END
+
+    keyboard = [[InlineKeyboardButton(service, callback_data=f"stand_svc_{service}")] for service in STAND_SERVICES]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    await query.message.reply_text("Выберите сервис для тестового стенда:", reply_markup=reply_markup)
+    return STAND_SELECT_SERVICE
+
+
+async def stand_select_service(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Выбор сервиса — переход к выбору версии Document Server."""
+    query = update.callback_query
+    await query.answer()
+
+    service = query.data.removeprefix("stand_svc_")
+    context.user_data["stand_service"] = service
+
+    keyboard = [
+        [InlineKeyboardButton("latest (по умолчанию)", callback_data="stand_ds_latest")],
+        [InlineKeyboardButton("Указать версию", callback_data="stand_ds_custom")],
+    ]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    await query.message.reply_text(f"Сервис: {service}\nВыберите версию Document Server:", reply_markup=reply_markup)
+    return STAND_SELECT_DS_TAG
+
+
+async def stand_ds_tag_choice(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Выбор версии DS — latest или пользовательская."""
+    query = update.callback_query
+    await query.answer()
+
+    if query.data == "stand_ds_latest":
+        context.user_data["stand_ds_tag"] = STAND_DEFAULT_DS_TAG
+        return await _stand_show_ssh_keys(query, context)
+
+    # stand_ds_custom — запросить текстовый ввод
+    await query.message.reply_text("Введите версию Document Server (например, 8.0.1):")
+    return STAND_SELECT_DS_TAG
+
+
+async def stand_input_ds_tag(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Текстовый ввод версии Document Server."""
+    ds_tag = update.message.text.strip()
+    if not ds_tag:
+        await update.message.reply_text("Версия не может быть пустой. Попробуйте ещё раз:")
+        return STAND_SELECT_DS_TAG
+
+    context.user_data["stand_ds_tag"] = ds_tag
+
+    # Для текстового ввода у нас нет query, создаём фиктивный вызов через message
+    user_id = update.effective_user.id
+    result = await get_ssh_keys(DIGITALOCEAN_TOKEN)
+    if not result["success"]:
+        await update.message.reply_text(f"Ошибка: {result['message']}")
+        return ConversationHandler.END
+
+    ssh_keys = result["keys"]
+    if not ssh_keys:
+        await update.message.reply_text("Нет доступных SSH-ключей в DigitalOcean.")
+        return ConversationHandler.END
+
+    preferred_ids = get_preferred_ssh_keys(user_id)
+    if preferred_ids:
+        available_ids = {k["id"] for k in ssh_keys}
+        valid_preferred = [pid for pid in preferred_ids if pid in available_ids]
+        preferred_set = set(valid_preferred)
+        preferred_keys = [k for pid in valid_preferred for k in ssh_keys if k["id"] == pid]
+        remaining_keys = [k for k in ssh_keys if k["id"] not in preferred_set]
+        ssh_keys = preferred_keys + remaining_keys
+        preselect = {str(pid) for pid in valid_preferred[:3]}
+    else:
+        preselect = {str(k["id"]) for k in ssh_keys[:3]}
+
+    context.user_data["ssh_keys_list"] = ssh_keys
+    context.user_data["selected_ssh_keys"] = preselect
+    context.user_data["ssh_keys_expanded"] = False
+
+    reply_markup = _build_stand_ssh_key_keyboard(ssh_keys, preselect, False)
+    await update.message.reply_text("Выберите SSH ключи:", reply_markup=reply_markup)
+    return STAND_SELECT_SSH_KEY
+
+
+async def _stand_show_ssh_keys(query, context) -> int:
+    """Показать SSH-ключи для выбора (стенд)."""
+    user_id = query.from_user.id
+    result = await get_ssh_keys(DIGITALOCEAN_TOKEN)
+    if not result["success"]:
+        await query.message.reply_text(f"Ошибка: {result['message']}")
+        return ConversationHandler.END
+
+    ssh_keys = result["keys"]
+    if not ssh_keys:
+        await query.message.reply_text("Нет доступных SSH-ключей в DigitalOcean.")
+        return ConversationHandler.END
+
+    preferred_ids = get_preferred_ssh_keys(user_id)
+    if preferred_ids:
+        available_ids = {k["id"] for k in ssh_keys}
+        valid_preferred = [pid for pid in preferred_ids if pid in available_ids]
+        preferred_set = set(valid_preferred)
+        preferred_keys = [k for pid in valid_preferred for k in ssh_keys if k["id"] == pid]
+        remaining_keys = [k for k in ssh_keys if k["id"] not in preferred_set]
+        ssh_keys = preferred_keys + remaining_keys
+        preselect = {str(pid) for pid in valid_preferred[:3]}
+    else:
+        preselect = {str(k["id"]) for k in ssh_keys[:3]}
+
+    context.user_data["ssh_keys_list"] = ssh_keys
+    context.user_data["selected_ssh_keys"] = preselect
+    context.user_data["ssh_keys_expanded"] = False
+
+    reply_markup = _build_stand_ssh_key_keyboard(ssh_keys, preselect, False)
+    await query.message.reply_text("Выберите SSH ключи:", reply_markup=reply_markup)
+    return STAND_SELECT_SSH_KEY
+
+
+async def stand_toggle_ssh_key(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Переключение выбора SSH-ключа (стенд)."""
+    query = update.callback_query
+    await query.answer()
+
+    key_id = query.data.removeprefix("stand_ssh_toggle_")
+    selected = context.user_data.get("selected_ssh_keys", set())
+
+    if key_id in selected:
+        selected.discard(key_id)
+    else:
+        selected.add(key_id)
+
+    context.user_data["selected_ssh_keys"] = selected
+    reply_markup = _build_stand_ssh_key_keyboard(
+        context.user_data["ssh_keys_list"], selected, context.user_data.get("ssh_keys_expanded", False)
+    )
+    await query.edit_message_reply_markup(reply_markup=reply_markup)
+    return STAND_SELECT_SSH_KEY
+
+
+async def stand_expand_ssh_keys(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Раскрыть полный список SSH-ключей (стенд)."""
+    query = update.callback_query
+    await query.answer()
+
+    context.user_data["ssh_keys_expanded"] = True
+    reply_markup = _build_stand_ssh_key_keyboard(
+        context.user_data["ssh_keys_list"], context.user_data.get("selected_ssh_keys", set()), True
+    )
+    await query.edit_message_reply_markup(reply_markup=reply_markup)
+    return STAND_SELECT_SSH_KEY
+
+
+async def stand_confirm_ssh_keys(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Подтверждение SSH-ключей — переход к DNS-зонам (стенд)."""
+    query = update.callback_query
+
+    selected = context.user_data.get("selected_ssh_keys", set())
+    if not selected:
+        await query.answer("Выберите хотя бы один SSH-ключ", show_alert=True)
+        return STAND_SELECT_SSH_KEY
+
+    await query.answer()
+
+    context.user_data["ssh_key_ids"] = [int(k) for k in selected]
+    context.user_data.pop("ssh_keys_list", None)
+    context.user_data.pop("selected_ssh_keys", None)
+    context.user_data.pop("ssh_keys_expanded", None)
+
+    return await _stand_show_dns_zones(query.message)
+
+
+async def _stand_show_dns_zones(message) -> int:
+    """Показать DNS-зоны для выбора (стенд)."""
+    result = await get_domains(DIGITALOCEAN_TOKEN)
+    if result["success"] and result["domains"]:
+        keyboard = [[InlineKeyboardButton(domain, callback_data=f"stand_dns_{domain}")] for domain in result["domains"]]
+        keyboard.append([InlineKeyboardButton("Пропустить (без DNS)", callback_data="stand_dns_skip")])
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        await message.reply_text("Выберите DNS-зону для создания записи:", reply_markup=reply_markup)
+        return STAND_SELECT_DNS_ZONE
+
+    # Нет доменов или ошибка — пропускаем DNS, переходим к выбору типа
+    return await _stand_show_type_keyboard(message)
+
+
+async def stand_select_dns_zone(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Выбор DNS-зоны — переход к вводу субдомена или выбору типа (стенд)."""
+    query = update.callback_query
+    await query.answer()
+
+    zone = query.data.removeprefix("stand_dns_")
+    if zone == "skip":
+        context.user_data["dns_zone"] = None
+        context.user_data["subdomain"] = None
+        return await _stand_show_type_keyboard(query.message)
+
+    context.user_data["dns_zone"] = zone
+    await query.message.reply_text(f"Введите имя субдомена для зоны {zone}:")
+    return STAND_INPUT_SUBDOMAIN
+
+
+async def stand_input_subdomain(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Получение субдомена — переход к выбору типа (стенд)."""
+    subdomain = update.message.text.strip().lower()
+
+    if not SUBDOMAIN_RE.match(subdomain):
+        await update.message.reply_text(
+            "Недопустимое имя субдомена. Используйте латинские буквы, цифры и дефис "
+            "(1-63 символа, начинается и заканчивается буквой или цифрой).\nПопробуйте ещё раз:"
+        )
+        return STAND_INPUT_SUBDOMAIN
+
+    context.user_data["subdomain"] = subdomain
+    return await _stand_show_type_keyboard(update.message)
+
+
+async def _stand_show_type_keyboard(message) -> int:
+    """Показать клавиатуру выбора типа VM для стенда с ценами."""
+    sizes = await get_sizes(DIGITALOCEAN_TOKEN)
+
+    keyboard = []
+    for slug, label in STAND_DROPLET_TYPES.items():
+        price_info = sizes.get(slug)
+        if price_info:
+            btn_text = f"{label} — ${price_info['price_monthly']}/мес"
+        else:
+            btn_text = label
+        keyboard.append([InlineKeyboardButton(btn_text, callback_data=f"stand_type_{slug}")])
+
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    await message.reply_text("Выберите размер VM для стенда:", reply_markup=reply_markup)
+    return STAND_SELECT_TYPE
+
+
+async def stand_select_type(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Выбор типа VM — переход к выбору длительности (стенд)."""
+    query = update.callback_query
+    await query.answer()
+
+    droplet_type = query.data.removeprefix("stand_type_")
+    context.user_data["droplet_type"] = droplet_type
+
+    sizes = await get_sizes(DIGITALOCEAN_TOKEN)
+    price_info = sizes.get(droplet_type)
+    if price_info:
+        context.user_data["price_monthly"] = price_info["price_monthly"]
+        context.user_data["price_hourly"] = price_info["price_hourly"]
+        hourly = price_info["price_hourly"]
+        durations = [
+            ("1 день", 1),
+            ("3 дня", 3),
+            ("Неделя", 7),
+            ("2 недели", 14),
+            ("Месяц", 30),
+        ]
+        keyboard = [
+            [InlineKeyboardButton(f"{label} — ~${hourly * 24 * days:.2f}", callback_data=f"stand_dur_{days}")]
+            for label, days in durations
+        ]
+    else:
+        context.user_data["price_monthly"] = None
+        context.user_data["price_hourly"] = None
+        keyboard = [
+            [InlineKeyboardButton("1 день", callback_data="stand_dur_1")],
+            [InlineKeyboardButton("3 дня", callback_data="stand_dur_3")],
+            [InlineKeyboardButton("Неделя", callback_data="stand_dur_7")],
+            [InlineKeyboardButton("2 недели", callback_data="stand_dur_14")],
+            [InlineKeyboardButton("Месяц", callback_data="stand_dur_30")],
+        ]
+
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    await query.message.reply_text("Выберите длительность аренды стенда:", reply_markup=reply_markup)
+    return STAND_SELECT_DURATION
+
+
+async def stand_select_duration(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Выбор длительности — запрос имени или создание с FQDN (стенд)."""
+    query = update.callback_query
+    await query.answer()
+
+    duration = int(query.data.removeprefix("stand_dur_"))
+    context.user_data["duration"] = duration
+
+    dns_zone = context.user_data.get("dns_zone")
+    subdomain = context.user_data.get("subdomain")
+    if dns_zone and subdomain:
+        droplet_name = f"{subdomain}.{dns_zone}"
+        return await _create_stand(query.message, query.from_user, context, droplet_name)
+
+    await query.message.reply_text("Введите имя для стенда:")
+    return STAND_INPUT_NAME
+
+
+async def stand_input_name(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Получение имени и создание стенда."""
+    droplet_name = update.message.text.strip()
+
+    if not DROPLET_NAME_RE.match(droplet_name):
+        await update.message.reply_text(
+            "Недопустимое имя. Используйте латинские буквы, цифры, точку, дефис или подчёркивание "
+            "(2-255 символов, начинается и заканчивается буквой или цифрой).\nПопробуйте ещё раз:"
+        )
+        return STAND_INPUT_NAME
+
+    return await _create_stand(update.message, update.effective_user, context, droplet_name)
+
+
+async def _create_stand(message, user, context, droplet_name) -> int:
+    """Общая логика создания тестового стенда."""
+    user_id = user.id
+    creator_username = f"@{user.username}" if user.username else user.first_name
+    creator_tag = user.username or user.first_name
+    data = context.user_data
+
+    service = data["stand_service"]
+    ds_tag = data.get("stand_ds_tag", STAND_DEFAULT_DS_TAG)
+
+    # Определяем domain_name для cloud-init (FQDN или None)
+    dns_zone = data.get("dns_zone")
+    subdomain = data.get("subdomain")
+    fqdn = f"{subdomain}.{dns_zone}" if dns_zone and subdomain else None
+
+    user_data_script = build_stand_user_data(service, ds_tag=ds_tag, domain_name=fqdn)
+
+    result = await create_droplet(
+        DIGITALOCEAN_TOKEN,
+        droplet_name,
+        data["ssh_key_ids"],
+        data["droplet_type"],
+        STAND_DEFAULT_IMAGE,
+        data["duration"],
+        creator_id=user_id,
+        creator_username=creator_username,
+        price_monthly=data.get("price_monthly"),
+        creator_tag=creator_tag,
+        price_hourly=data.get("price_hourly"),
+        user_data=user_data_script,
+        stand_type=service,
+    )
+
+    domain_name = None
+    if result["success"]:
+        # Создание DNS-записи (если указаны зона и субдомен)
+        if dns_zone and subdomain:
+            dns_result = await create_dns_record(DIGITALOCEAN_TOKEN, dns_zone, subdomain, result["ip_address"])
+            if dns_result["success"]:
+                domain_name = dns_result["fqdn"]
+                update_instance_dns(
+                    result["droplet_id"],
+                    domain_name,
+                    dns_result["record_id"],
+                    dns_zone,
+                )
+                result["message"] += f"\nDNS: `{domain_name}`"
+            else:
+                await message.reply_text(f"Стенд создан, но DNS-запись не удалось создать: {dns_result['message']}")
+
+        record_ssh_key_usage(user_id, data["ssh_key_ids"])
+
+        # Добавляем примечание о времени установки
+        result["message"] += "\n\nНастройка стенда займёт 5\\-15 минут после загрузки VM\\."
+
+        await message.reply_text(result["message"], parse_mode="MarkdownV2")
+        await send_notification(
+            context.bot,
+            action="created",
+            droplet_name=result["droplet_name"],
+            ip_address=result["ip_address"],
+            droplet_type=data["droplet_type"],
+            expiration_date=result["expiration_date"],
+            creator_id=user_id,
+            duration=data["duration"],
+            creator_username=creator_username,
+            domain_name=domain_name,
+            price_monthly=data.get("price_monthly"),
+        )
+    else:
+        await message.reply_text(f"Ошибка: {result['message']}")
+
     context.user_data.clear()
     return ConversationHandler.END
 
@@ -1731,6 +2168,45 @@ def main():
         per_chat=True,
     )
 
+    # Conversation: test stand creation
+    stand_conv = ConversationHandler(
+        entry_points=[CallbackQueryHandler(stand_entry, pattern=r"^create_stand$")],
+        states={
+            STAND_SELECT_SERVICE: [
+                CallbackQueryHandler(stand_select_service, pattern=r"^stand_svc_"),
+            ],
+            STAND_SELECT_DS_TAG: [
+                CallbackQueryHandler(stand_ds_tag_choice, pattern=r"^stand_ds_"),
+                MessageHandler(filters.TEXT & ~filters.COMMAND, stand_input_ds_tag),
+            ],
+            STAND_SELECT_SSH_KEY: [
+                CallbackQueryHandler(stand_toggle_ssh_key, pattern=r"^stand_ssh_toggle_"),
+                CallbackQueryHandler(stand_expand_ssh_keys, pattern=r"^stand_ssh_more_keys$"),
+                CallbackQueryHandler(stand_confirm_ssh_keys, pattern=r"^stand_ssh_confirm$"),
+            ],
+            STAND_SELECT_DNS_ZONE: [
+                CallbackQueryHandler(stand_select_dns_zone, pattern=r"^stand_dns_"),
+            ],
+            STAND_INPUT_SUBDOMAIN: [
+                MessageHandler(filters.TEXT & ~filters.COMMAND, stand_input_subdomain),
+            ],
+            STAND_SELECT_TYPE: [
+                CallbackQueryHandler(stand_select_type, pattern=r"^stand_type_"),
+            ],
+            STAND_SELECT_DURATION: [
+                CallbackQueryHandler(stand_select_duration, pattern=r"^stand_dur_"),
+            ],
+            STAND_INPUT_NAME: [
+                MessageHandler(filters.TEXT & ~filters.COMMAND, stand_input_name),
+            ],
+        },
+        fallbacks=[CommandHandler("cancel", cancel)],
+        allow_reentry=True,
+        conversation_timeout=CONVERSATION_TIMEOUT,
+        per_user=True,
+        per_chat=True,
+    )
+
     # Register handlers (order matters — conversations first, then standalone callbacks)
     app.add_handler(CommandHandler("start", start))
     app.add_handler(mail_conv)
@@ -1739,6 +2215,7 @@ def main():
     app.add_handler(manage_conv)
     app.add_handler(k8s_create_conv)
     app.add_handler(k8s_manage_conv)
+    app.add_handler(stand_conv)
     app.add_handler(CallbackQueryHandler(handle_extend, pattern=r"^extend_"))
     app.add_handler(CallbackQueryHandler(handle_delete, pattern=r"^delete_"))
     app.add_handler(CallbackQueryHandler(handle_k8s_extend, pattern=r"^k8s_extend_"))

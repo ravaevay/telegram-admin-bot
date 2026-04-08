@@ -23,6 +23,10 @@ from config import (
     MM_SERVER_URL,
     MM_WEBHOOK_PORT,
     MM_WEBHOOK_HOST,
+    STAND_SERVICES,
+    STAND_DEFAULT_DS_TAG,
+    STAND_DEFAULT_IMAGE,
+    STAND_DROPLET_TYPES,
 )
 from modules.authorization import mm_is_authorized, mm_is_authorized_for_bot
 from modules.create_test_instance import (
@@ -35,6 +39,7 @@ from modules.create_test_instance import (
     create_dns_record,
     delete_droplet,
     wait_for_action,
+    build_stand_user_data,
     DROPLET_TYPES,
 )
 from modules.create_k8s_cluster import (
@@ -113,6 +118,17 @@ ST_K8S_INPUT_NAME = "k8s_input_name"
 ST_K8S_MANAGE_ACTION = "k8s_manage_action"
 ST_K8S_MANAGE_EXTEND = "k8s_manage_extend"
 ST_K8S_MANAGE_CONFIRM_DELETE = "k8s_manage_confirm_delete"
+
+# Stand creation flow & states
+FLOW_STAND_CREATE = "stand_create"
+ST_STAND_SELECT_SERVICE = "stand_select_service"
+ST_STAND_SELECT_DS_TAG = "stand_select_ds_tag"
+ST_STAND_SELECT_SSH_KEY = "stand_select_ssh_key"
+ST_STAND_SELECT_DNS_ZONE = "stand_select_dns_zone"
+ST_STAND_INPUT_SUBDOMAIN = "stand_input_subdomain"
+ST_STAND_SELECT_TYPE = "stand_select_type"
+ST_STAND_SELECT_DURATION = "stand_select_duration"
+ST_STAND_INPUT_NAME = "stand_input_name"
 
 # Mail / password states
 ST_MAIL_INPUT = "mail_input"
@@ -299,6 +315,7 @@ async def cmd_start(user_id, channel_id):
         {"id": "manage_droplets", "name": "Управление инстансами", "context": {"action": "manage_droplets"}},
         {"id": "create_k8s", "name": "Создать K8s кластер", "context": {"action": "create_k8s"}},
         {"id": "manage_k8s", "name": "Мои K8s кластеры", "context": {"action": "manage_k8s"}},
+        {"id": "create_stand", "name": "Создать тестовый стенд", "context": {"action": "create_stand"}},
     ]
     await post_with_buttons(channel_id, "Добро пожаловать! Выберите действие:", buttons)
 
@@ -334,6 +351,12 @@ async def route_text_input(user_id, channel_id, text):
         await handle_droplet_name_input(user_id, channel_id, text)
     elif flow == FLOW_K8S_CREATE and state == ST_K8S_INPUT_NAME:
         await handle_k8s_name_input(user_id, channel_id, text)
+    elif flow == FLOW_STAND_CREATE and state == ST_STAND_SELECT_DS_TAG:
+        await handle_stand_ds_tag_input(user_id, channel_id, text)
+    elif flow == FLOW_STAND_CREATE and state == ST_STAND_INPUT_SUBDOMAIN:
+        await handle_stand_subdomain_input(user_id, channel_id, text)
+    elif flow == FLOW_STAND_CREATE and state == ST_STAND_INPUT_NAME:
+        await handle_stand_name_input(user_id, channel_id, text)
     else:
         await post_message(channel_id, "Ожидается выбор с помощью кнопок. Или напишите `!cancel` для отмены.")
 
@@ -386,6 +409,8 @@ async def dispatch_action(user_id, channel_id, action, context, data):
         await start_k8s_create(user_id, channel_id)
     elif action == "manage_k8s":
         await start_k8s_manage(user_id, channel_id)
+    elif action == "create_stand":
+        await start_stand_create(user_id, channel_id)
 
     # --- SSH key selection ---
     elif action.startswith("ssh_toggle_"):
@@ -446,6 +471,24 @@ async def dispatch_action(user_id, channel_id, action, context, data):
     elif action == "k8s_cancel_delete":
         conversations.end(user_id)
         await post_message(channel_id, "Удаление отменено.")
+
+    # --- Stand creation ---
+    elif action.startswith("stand_svc_"):
+        await handle_stand_service_select(user_id, channel_id, action)
+    elif action.startswith("stand_ds_"):
+        await handle_stand_ds_tag_choice(user_id, channel_id, action)
+    elif action.startswith("stand_ssh_toggle_"):
+        await handle_stand_ssh_toggle(user_id, channel_id, action, data)
+    elif action == "stand_ssh_more_keys":
+        await handle_stand_ssh_more_keys(user_id, channel_id, data)
+    elif action == "stand_ssh_confirm":
+        await handle_stand_ssh_confirm(user_id, channel_id)
+    elif action.startswith("stand_dns_zone_"):
+        await handle_stand_dns_zone_select(user_id, channel_id, action)
+    elif action.startswith("stand_type_"):
+        await handle_stand_type_select(user_id, channel_id, action)
+    elif action.startswith("stand_duration_"):
+        await handle_stand_duration_select(user_id, channel_id, action)
 
     # --- Background job notification buttons ---
     elif action.startswith("bg_extend_"):
@@ -886,6 +929,7 @@ async def start_droplet_manage(user_id, channel_id):
     for inst in instances:
         type_label = DROPLET_TYPES.get(inst["droplet_type"], inst["droplet_type"])
         dns_line = f"DNS: {inst['domain_name']}\n" if inst.get("domain_name") else ""
+        stand_line = f"Стенд: {inst['stand_type']}\n" if inst.get("stand_type") else ""
 
         cost_line = ""
         if inst.get("created_at") and inst.get("price_hourly"):
@@ -902,6 +946,7 @@ async def start_droplet_manage(user_id, channel_id):
             f"IP: {inst['ip_address']}\n"
             f"{dns_line}"
             f"Тип: {type_label}\n"
+            f"{stand_line}"
             f"{cost_line}"
             f"Срок действия: {inst['expiration_date']}"
         )
@@ -1349,6 +1394,427 @@ async def handle_k8s_manage_delete_confirm(user_id, channel_id, action):
         )
     else:
         await post_message(channel_id, f"Ошибка при удалении кластера: {delete_result['message']}")
+
+    conversations.end(user_id)
+
+
+# ============================================================
+# Stand creation flow
+# ============================================================
+
+
+async def start_stand_create(user_id, channel_id):
+    if not mm_is_authorized(user_id, "stand"):
+        await post_message(channel_id, "У вас нет прав для создания тестовых стендов.")
+        return
+
+    if not STAND_SERVICES:
+        await post_message(channel_id, "Нет доступных сервисов для создания стендов.")
+        return
+
+    conversations.start(user_id, FLOW_STAND_CREATE, ST_STAND_SELECT_SERVICE)
+
+    buttons = [{"id": f"ssvc_{svc}", "name": svc, "context": {"action": f"stand_svc_{svc}"}} for svc in STAND_SERVICES]
+    await post_with_buttons(channel_id, "Выберите сервис для тестового стенда:", buttons)
+
+
+async def handle_stand_service_select(user_id, channel_id, action):
+    conv = conversations.get(user_id)
+    if not conv or conv.flow_name != FLOW_STAND_CREATE:
+        return
+
+    service = action.removeprefix("stand_svc_")
+    conv.data["stand_service"] = service
+    conv.state = ST_STAND_SELECT_DS_TAG
+    conv.touch()
+
+    buttons = [
+        {"id": "sds_latest", "name": f"latest ({STAND_DEFAULT_DS_TAG})", "context": {"action": "stand_ds_latest"}},
+        {"id": "sds_custom", "name": "Указать версию", "context": {"action": "stand_ds_custom"}},
+    ]
+    await post_with_buttons(channel_id, "Выберите версию Document Server:", buttons)
+
+
+async def handle_stand_ds_tag_choice(user_id, channel_id, action):
+    conv = conversations.get(user_id)
+    if not conv or conv.flow_name != FLOW_STAND_CREATE:
+        return
+
+    choice = action.removeprefix("stand_ds_")
+    if choice == "latest":
+        conv.data["stand_ds_tag"] = STAND_DEFAULT_DS_TAG
+        conv.touch()
+        await _start_stand_ssh_keys(user_id, channel_id)
+    elif choice == "custom":
+        conv.touch()
+        await post_message(channel_id, "Введите версию (тег) Document Server:")
+    # state stays ST_STAND_SELECT_DS_TAG for text input
+
+
+async def handle_stand_ds_tag_input(user_id, channel_id, text):
+    conv = conversations.get(user_id)
+    if not conv or conv.flow_name != FLOW_STAND_CREATE:
+        return
+
+    ds_tag = text.strip()
+    if not ds_tag:
+        await post_message(channel_id, "Версия не может быть пустой. Попробуйте ещё раз:")
+        return
+
+    conv.data["stand_ds_tag"] = ds_tag
+    conv.touch()
+    await _start_stand_ssh_keys(user_id, channel_id)
+
+
+async def _start_stand_ssh_keys(user_id, channel_id):
+    """Load SSH keys and show multi-select buttons for stand creation."""
+    conv = conversations.get(user_id)
+    if not conv:
+        return
+
+    result = await get_ssh_keys(DIGITALOCEAN_TOKEN)
+    if not result["success"]:
+        await post_message(channel_id, f"Ошибка: {result['message']}")
+        conversations.end(user_id)
+        return
+
+    ssh_keys = result["keys"]
+    if not ssh_keys:
+        await post_message(channel_id, "Нет доступных SSH-ключей в DigitalOcean.")
+        conversations.end(user_id)
+        return
+
+    # Reorder keys by user preference
+    preferred_ids = get_preferred_ssh_keys(user_id)
+    if preferred_ids:
+        available_ids = {k["id"] for k in ssh_keys}
+        valid_preferred = [pid for pid in preferred_ids if pid in available_ids]
+        preferred_set = set(valid_preferred)
+        preferred_keys = [k for pid in valid_preferred for k in ssh_keys if k["id"] == pid]
+        remaining_keys = [k for k in ssh_keys if k["id"] not in preferred_set]
+        ssh_keys = preferred_keys + remaining_keys
+        preselect = {str(pid) for pid in valid_preferred[:3]}
+    else:
+        preselect = {str(k["id"]) for k in ssh_keys[:3]}
+
+    conv.data["ssh_keys_list"] = ssh_keys
+    conv.data["selected_ssh_keys"] = preselect
+    conv.data["ssh_keys_expanded"] = False
+    conv.state = ST_STAND_SELECT_SSH_KEY
+    conv.touch()
+
+    await _post_stand_ssh_key_buttons(channel_id, ssh_keys, preselect, expanded=False)
+
+
+async def _post_stand_ssh_key_buttons(channel_id, keys, selected_ids, expanded):
+    visible_keys = keys if expanded or len(keys) <= 3 else keys[:3]
+    buttons = []
+    for key in visible_keys:
+        key_id = str(key["id"])
+        prefix = "✅" if key_id in selected_ids else "⬜"
+        buttons.append(
+            {
+                "id": f"sssh_{key_id}",
+                "name": f"{prefix} {key['name']}",
+                "context": {"action": f"stand_ssh_toggle_{key_id}"},
+            }
+        )
+
+    if not expanded and len(keys) > 3:
+        remaining = len(keys) - 3
+        buttons.append(
+            {"id": "sssh_more", "name": f"Другие ключи ({remaining})", "context": {"action": "stand_ssh_more_keys"}}
+        )
+
+    count = len(selected_ids)
+    buttons.append(
+        {"id": "sssh_confirm", "name": f"Продолжить ✓ ({count})", "context": {"action": "stand_ssh_confirm"}}
+    )
+    await post_with_buttons(channel_id, "Выберите SSH ключи:", buttons)
+
+
+async def handle_stand_ssh_toggle(user_id, channel_id, action, data):
+    conv = conversations.get(user_id)
+    if not conv or conv.flow_name != FLOW_STAND_CREATE:
+        return
+
+    key_id = action.removeprefix("stand_ssh_toggle_")
+    selected = conv.data.get("selected_ssh_keys", set())
+
+    if key_id in selected:
+        selected.discard(key_id)
+    else:
+        selected.add(key_id)
+
+    conv.data["selected_ssh_keys"] = selected
+    conv.touch()
+
+    await _post_stand_ssh_key_buttons(
+        channel_id, conv.data["ssh_keys_list"], selected, conv.data.get("ssh_keys_expanded", False)
+    )
+
+
+async def handle_stand_ssh_more_keys(user_id, channel_id, data):
+    conv = conversations.get(user_id)
+    if not conv or conv.flow_name != FLOW_STAND_CREATE:
+        return
+
+    conv.data["ssh_keys_expanded"] = True
+    conv.touch()
+    await _post_stand_ssh_key_buttons(
+        channel_id, conv.data["ssh_keys_list"], conv.data.get("selected_ssh_keys", set()), True
+    )
+
+
+async def handle_stand_ssh_confirm(user_id, channel_id):
+    conv = conversations.get(user_id)
+    if not conv or conv.flow_name != FLOW_STAND_CREATE:
+        return
+
+    selected = conv.data.get("selected_ssh_keys", set())
+    if not selected:
+        await post_message(channel_id, "Выберите хотя бы один SSH-ключ")
+        return
+
+    conv.data["ssh_key_ids"] = [int(k) for k in selected]
+    conv.data.pop("ssh_keys_list", None)
+    conv.data.pop("selected_ssh_keys", None)
+    conv.data.pop("ssh_keys_expanded", None)
+    conv.touch()
+
+    await _show_stand_dns_zones(user_id, channel_id)
+
+
+async def _show_stand_dns_zones(user_id, channel_id):
+    conv = conversations.get(user_id)
+    if not conv:
+        return
+
+    result = await get_domains(DIGITALOCEAN_TOKEN)
+    if result["success"] and result["domains"]:
+        buttons = [
+            {"id": f"sdns_{d}", "name": d, "context": {"action": f"stand_dns_zone_{d}"}} for d in result["domains"]
+        ]
+        buttons.append(
+            {"id": "sdns_skip", "name": "Пропустить (без DNS)", "context": {"action": "stand_dns_zone_skip"}}
+        )
+        conv.state = ST_STAND_SELECT_DNS_ZONE
+        conv.touch()
+        await post_with_buttons(channel_id, "Выберите DNS-зону для создания записи:", buttons)
+    else:
+        conv.data["dns_zone"] = None
+        conv.data["subdomain"] = None
+        await _show_stand_type_buttons(user_id, channel_id)
+
+
+async def handle_stand_dns_zone_select(user_id, channel_id, action):
+    conv = conversations.get(user_id)
+    if not conv or conv.flow_name != FLOW_STAND_CREATE:
+        return
+
+    zone = action.removeprefix("stand_dns_zone_")
+    if zone == "skip":
+        conv.data["dns_zone"] = None
+        conv.data["subdomain"] = None
+        conv.touch()
+        await _show_stand_type_buttons(user_id, channel_id)
+    else:
+        conv.data["dns_zone"] = zone
+        conv.state = ST_STAND_INPUT_SUBDOMAIN
+        conv.touch()
+        await post_message(channel_id, f"Введите имя субдомена для зоны {zone}:")
+
+
+async def handle_stand_subdomain_input(user_id, channel_id, text):
+    conv = conversations.get(user_id)
+    if not conv or conv.flow_name != FLOW_STAND_CREATE:
+        return
+
+    subdomain = text.strip().lower()
+    if not SUBDOMAIN_RE.match(subdomain):
+        await post_message(
+            channel_id,
+            "Недопустимое имя субдомена. Используйте латинские буквы, цифры и дефис "
+            "(1-63 символа, начинается и заканчивается буквой или цифрой).\nПопробуйте ещё раз:",
+        )
+        return
+
+    conv.data["subdomain"] = subdomain
+    conv.touch()
+    await _show_stand_type_buttons(user_id, channel_id)
+
+
+async def _show_stand_type_buttons(user_id, channel_id):
+    conv = conversations.get(user_id)
+    if not conv:
+        return
+
+    sizes = await get_sizes(DIGITALOCEAN_TOKEN)
+    buttons = []
+    for slug, label in STAND_DROPLET_TYPES.items():
+        price_info = sizes.get(slug)
+        if price_info:
+            btn_text = f"{label} — ${price_info['price_monthly']}/мес"
+        else:
+            btn_text = label
+        buttons.append({"id": f"sdt_{slug}", "name": btn_text, "context": {"action": f"stand_type_{slug}"}})
+
+    conv.state = ST_STAND_SELECT_TYPE
+    conv.touch()
+    await post_with_buttons(channel_id, "Выберите тип VM для стенда:", buttons)
+
+
+async def handle_stand_type_select(user_id, channel_id, action):
+    conv = conversations.get(user_id)
+    if not conv or conv.flow_name != FLOW_STAND_CREATE:
+        return
+
+    droplet_type = action.removeprefix("stand_type_")
+    conv.data["droplet_type"] = droplet_type
+
+    sizes = await get_sizes(DIGITALOCEAN_TOKEN)
+    price_info = sizes.get(droplet_type)
+    if price_info:
+        conv.data["price_monthly"] = price_info["price_monthly"]
+        conv.data["price_hourly"] = price_info["price_hourly"]
+        hourly = price_info["price_hourly"]
+        durations = [("1 день", 1), ("3 дня", 3), ("Неделя", 7), ("2 недели", 14), ("Месяц", 30)]
+        buttons = [
+            {
+                "id": f"sdur_{days}",
+                "name": f"{label} — ~${hourly * 24 * days:.2f}",
+                "context": {"action": f"stand_duration_{days}"},
+            }
+            for label, days in durations
+        ]
+    else:
+        conv.data["price_monthly"] = None
+        conv.data["price_hourly"] = None
+        buttons = [
+            {"id": f"sdur_{d}", "name": label, "context": {"action": f"stand_duration_{d}"}}
+            for label, d in [("1 день", 1), ("3 дня", 3), ("Неделя", 7), ("2 недели", 14), ("Месяц", 30)]
+        ]
+
+    conv.state = ST_STAND_SELECT_DURATION
+    conv.touch()
+    await post_with_buttons(channel_id, "Выберите длительность аренды стенда:", buttons)
+
+
+async def handle_stand_duration_select(user_id, channel_id, action):
+    conv = conversations.get(user_id)
+    if not conv or conv.flow_name != FLOW_STAND_CREATE:
+        return
+
+    duration = int(action.removeprefix("stand_duration_"))
+    conv.data["duration"] = duration
+    conv.touch()
+
+    dns_zone = conv.data.get("dns_zone")
+    subdomain = conv.data.get("subdomain")
+    if dns_zone and subdomain:
+        droplet_name = f"{subdomain}.{dns_zone}"
+        await _create_stand_and_respond(user_id, channel_id, droplet_name)
+    else:
+        conv.state = ST_STAND_INPUT_NAME
+        await post_message(channel_id, "Введите имя стенда:")
+
+
+async def handle_stand_name_input(user_id, channel_id, text):
+    conv = conversations.get(user_id)
+    if not conv or conv.flow_name != FLOW_STAND_CREATE:
+        return
+
+    droplet_name = text.strip()
+    if not DROPLET_NAME_RE.match(droplet_name):
+        await post_message(
+            channel_id,
+            "Недопустимое имя стенда. Используйте латинские буквы, цифры, точку, дефис или подчёркивание "
+            "(2-255 символов, начинается и заканчивается буквой или цифрой).\nПопробуйте ещё раз:",
+        )
+        return
+
+    await _create_stand_and_respond(user_id, channel_id, droplet_name)
+
+
+async def _create_stand_and_respond(user_id, channel_id, droplet_name):
+    conv = conversations.get(user_id)
+    if not conv:
+        return
+
+    data = conv.data
+    mm_user = await mm_api(driver.users.get_user, user_id)
+    creator_username = f"@{mm_user.get('username', user_id)}"
+    creator_tag = mm_user.get("username", user_id)
+
+    service = data["stand_service"]
+    ds_tag = data.get("stand_ds_tag", STAND_DEFAULT_DS_TAG)
+    dns_zone = data.get("dns_zone")
+    subdomain = data.get("subdomain")
+    domain_name_for_ud = f"{subdomain}.{dns_zone}" if dns_zone and subdomain else None
+
+    user_data_script = build_stand_user_data(
+        service=service,
+        ds_tag=ds_tag,
+        domain_name=domain_name_for_ud,
+    )
+
+    result = await create_droplet(
+        DIGITALOCEAN_TOKEN,
+        droplet_name,
+        data["ssh_key_ids"],
+        data["droplet_type"],
+        STAND_DEFAULT_IMAGE,
+        data["duration"],
+        creator_id=user_id,
+        creator_username=creator_username,
+        price_monthly=data.get("price_monthly"),
+        creator_tag=creator_tag,
+        price_hourly=data.get("price_hourly"),
+        user_data=user_data_script,
+        stand_type=service,
+    )
+
+    domain_name = None
+    if result["success"]:
+        if dns_zone and subdomain:
+            dns_result = await create_dns_record(DIGITALOCEAN_TOKEN, dns_zone, subdomain, result["ip_address"])
+            if dns_result["success"]:
+                domain_name = dns_result["fqdn"]
+                update_instance_dns(result["droplet_id"], domain_name, dns_result["record_id"], dns_zone)
+
+        record_ssh_key_usage(user_id, data["ssh_key_ids"])
+
+        droplet_type_label = STAND_DROPLET_TYPES.get(data["droplet_type"], data["droplet_type"])
+        dns_line = f"\nDNS: {domain_name}" if domain_name else ""
+        cost_line = f"\nCost: ~${data.get('price_monthly')}/month" if data.get("price_monthly") else ""
+        msg = (
+            f"**Тестовый стенд создан!**\n\n"
+            f"Сервис: `{service}`\n"
+            f"DS версия: `{ds_tag}`\n"
+            f"Имя: `{result['droplet_name']}`\n"
+            f"Connect: `root@{result['ip_address']}`\n"
+            f"Тип: `{droplet_type_label}`\n"
+            f"Срок действия: `{result['expiration_date']}`"
+            f"{dns_line}{cost_line}\n\n"
+            f"Настройка стенда займёт 5-15 минут."
+        )
+        await post_message(channel_id, msg)
+
+        await mm_send_notification(
+            driver,
+            action="created",
+            droplet_name=result["droplet_name"],
+            ip_address=result["ip_address"],
+            droplet_type=data["droplet_type"],
+            expiration_date=result["expiration_date"],
+            creator_id=user_id,
+            duration=data["duration"],
+            creator_username=creator_username,
+            domain_name=domain_name,
+            price_monthly=data.get("price_monthly"),
+        )
+    else:
+        await post_message(channel_id, f"Ошибка: {result['message']}")
 
     conversations.end(user_id)
 
