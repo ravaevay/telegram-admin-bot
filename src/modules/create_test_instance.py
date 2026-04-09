@@ -158,6 +158,18 @@ async def get_sizes(token):
         return {}
 
 
+async def get_latest_ubuntu_image(token):
+    """Get the latest Ubuntu image ID from DigitalOcean."""
+    result = await get_images(token)
+    if not result["success"]:
+        return None
+    ubuntu_images = [img for img in result["images"] if img.get("distribution", "").lower() == "ubuntu"]
+    if not ubuntu_images:
+        return None
+    ubuntu_images.sort(key=lambda x: x.get("name", ""), reverse=True)
+    return ubuntu_images[0]["id"]
+
+
 def build_stand_user_data(service, ds_tag="latest", service_tag="latest", domain_name=None):
     """Build cloud-config user-data for test stand deployment (services4integration)."""
     cmd = f"bash /app/{service}/install.sh -st {service_tag} -dt {ds_tag}"

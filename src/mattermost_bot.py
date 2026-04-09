@@ -25,7 +25,6 @@ from config import (
     MM_WEBHOOK_HOST,
     STAND_SERVICES,
     STAND_DEFAULT_DS_TAG,
-    STAND_DEFAULT_IMAGE,
     STAND_DROPLET_TYPES,
 )
 from modules.authorization import mm_is_authorized, mm_is_authorized_for_bot
@@ -40,6 +39,7 @@ from modules.create_test_instance import (
     delete_droplet,
     wait_for_action,
     build_stand_user_data,
+    get_latest_ubuntu_image,
     DROPLET_TYPES,
 )
 from modules.create_k8s_cluster import (
@@ -1758,12 +1758,18 @@ async def _create_stand_and_respond(user_id, channel_id, droplet_name):
         domain_name=domain_name_for_ud,
     )
 
+    image = await get_latest_ubuntu_image(DIGITALOCEAN_TOKEN)
+    if not image:
+        await post_message(channel_id, "Не удалось получить образ Ubuntu из DigitalOcean.")
+        conversations.end(user_id)
+        return
+
     result = await create_droplet(
         DIGITALOCEAN_TOKEN,
         droplet_name,
         data["ssh_key_ids"],
         data["droplet_type"],
-        STAND_DEFAULT_IMAGE,
+        image,
         data["duration"],
         creator_id=user_id,
         creator_username=creator_username,

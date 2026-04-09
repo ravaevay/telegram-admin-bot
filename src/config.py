@@ -58,7 +58,6 @@ STAND_SERVICES = [
 ]
 
 STAND_DEFAULT_DS_TAG = os.getenv("STAND_DEFAULT_DS_TAG", "latest")
-STAND_DEFAULT_IMAGE = os.getenv("STAND_DEFAULT_IMAGE", "ubuntu-20-04-x64")
 
 STAND_DROPLET_TYPES = {
     "s-2vcpu-4gb": "4GB-2vCPU-80GB",

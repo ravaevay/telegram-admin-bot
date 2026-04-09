@@ -22,7 +22,6 @@ from config import (
     DIGITALOCEAN_TOKEN,
     STAND_SERVICES,
     STAND_DEFAULT_DS_TAG,
-    STAND_DEFAULT_IMAGE,
     STAND_DROPLET_TYPES,
 )
 from modules.create_test_instance import (
@@ -36,6 +35,7 @@ from modules.create_test_instance import (
     delete_droplet,
     wait_for_action,
     build_stand_user_data,
+    get_latest_ubuntu_image,
     DROPLET_TYPES,
 )
 from modules.create_k8s_cluster import (
@@ -1594,12 +1594,17 @@ async def _create_stand(message, user, context, droplet_name) -> int:
 
     user_data_script = build_stand_user_data(service, ds_tag=ds_tag, domain_name=fqdn)
 
+    image = await get_latest_ubuntu_image(DIGITALOCEAN_TOKEN)
+    if not image:
+        await message.reply_text("Не удалось получить образ Ubuntu из DigitalOcean.")
+        return ConversationHandler.END
+
     result = await create_droplet(
         DIGITALOCEAN_TOKEN,
         droplet_name,
         data["ssh_key_ids"],
         data["droplet_type"],
-        STAND_DEFAULT_IMAGE,
+        image,
         data["duration"],
         creator_id=user_id,
         creator_username=creator_username,
