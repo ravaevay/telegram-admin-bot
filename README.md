@@ -113,7 +113,6 @@ MM_NOTIFICATION_CHANNEL_ID=mm-channel-id
 # Тестовые стенды (опционально)
 # STAND_SERVICES=nextcloud,wordpress,moodle,drupal,confluence,jira,humhub,chamilo,redmine,owncloud,plone,strapi,alfresco,nuxeo,liferay,odoo,suitecrm,seafile,documentserver
 # STAND_DEFAULT_DS_TAG=latest
-# STAND_DEFAULT_IMAGE=ubuntu-20-04-x64
 ```
 
 
