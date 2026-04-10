@@ -222,7 +222,7 @@ async def create_droplet(
 
         headers = {**_auth_headers(token), "Content-Type": "application/json"}
 
-        async with httpx.AsyncClient(headers=headers) as client:
+        async with httpx.AsyncClient(headers=headers, timeout=60.0) as client:
             # Create droplet
             response = await client.post(BASE_URL + "droplets", json=payload)
             response.raise_for_status()
