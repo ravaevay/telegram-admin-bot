@@ -170,6 +170,39 @@ async def get_latest_ubuntu_image(token):
     return ubuntu_images[0]["id"]
 
 
+STAND_READY_POLL_INTERVAL = 30  # seconds
+STAND_READY_POLL_ATTEMPTS = 40  # 40 × 30s = 20 minutes max
+
+
+async def check_stand_ready(ip_address):
+    """Check if a test stand is ready by polling HTTP on its IP.
+
+    Returns True if HTTP responds (any status), False on connection error.
+    """
+    try:
+        async with httpx.AsyncClient(timeout=10.0, verify=False) as client:
+            response = await client.get(f"http://{ip_address}/")
+            return response.status_code < 500
+    except (httpx.ConnectError, httpx.TimeoutException, httpx.RemoteProtocolError):
+        return False
+    except Exception:
+        return False
+
+
+async def wait_for_stand_ready(ip_address):
+    """Poll stand HTTP endpoint until it responds or timeout.
+
+    Returns True if stand became ready, False if timed out.
+    """
+    for attempt in range(STAND_READY_POLL_ATTEMPTS):
+        if await check_stand_ready(ip_address):
+            logger.info(f"Stand at {ip_address} is ready (attempt {attempt + 1})")
+            return True
+        await asyncio.sleep(STAND_READY_POLL_INTERVAL)
+    logger.warning(f"Stand at {ip_address} did not become ready after {STAND_READY_POLL_ATTEMPTS} attempts")
+    return False
+
+
 def build_stand_user_data(service, ds_tag="latest", service_tag="latest", domain_name=None):
     """Build cloud-config user-data for test stand deployment (services4integration)."""
     cmd = f"bash /app/{service}/install.sh -st {service_tag} -dt {ds_tag}"
