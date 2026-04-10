@@ -19,7 +19,7 @@ DROPLET_TYPES = {
     "s-8vcpu-16gb": "16GB-8vCPU-320GB",
 }
 
-IP_POLL_ATTEMPTS = 10
+IP_POLL_ATTEMPTS = 30
 IP_POLL_INTERVAL = 5  # seconds
 
 _size_cache = {"data": None, "timestamp": 0}
