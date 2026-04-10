@@ -12,7 +12,7 @@ class TestBuildStandUserData:
     def test_basic(self):
         result = build_stand_user_data("nextcloud")
         assert "#cloud-config" in result
-        assert "git clone -b master" in result
+        assert "git clone -b main" in result
         assert "services4integration.git" in result
         assert "bash /app/nextcloud/install.sh -st latest -dt latest" in result
 
