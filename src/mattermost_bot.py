@@ -40,6 +40,7 @@ from modules.create_test_instance import (
     wait_for_action,
     build_stand_user_data,
     get_latest_ubuntu_image,
+    wait_for_stand_ready,
     DROPLET_TYPES,
 )
 from modules.create_k8s_cluster import (
@@ -1802,7 +1803,7 @@ async def _create_stand_and_respond(user_id, channel_id, droplet_name):
             f"Тип: `{droplet_type_label}`\n"
             f"Срок действия: `{result['expiration_date']}`"
             f"{dns_line}{cost_line}\n\n"
-            f"Настройка стенда займёт 5-15 минут."
+            f"Настройка стенда займёт 5-15 минут. Уведомлю, когда будет готов."
         )
         await post_message(channel_id, msg)
 
@@ -1819,10 +1820,41 @@ async def _create_stand_and_respond(user_id, channel_id, droplet_name):
             domain_name=domain_name,
             price_monthly=data.get("price_monthly"),
         )
+
+        # Schedule background readiness check
+        asyncio.create_task(
+            _poll_stand_ready_mm(
+                user_id,
+                channel_id,
+                result["ip_address"],
+                result["droplet_name"],
+                service,
+                domain_name,
+            )
+        )
     else:
         await post_message(channel_id, f"Ошибка: {result['message']}")
 
     conversations.end(user_id)
+
+
+async def _poll_stand_ready_mm(user_id, channel_id, ip_address, droplet_name, service, domain_name):
+    """Background task: poll test stand HTTP endpoint and notify when ready."""
+    await asyncio.sleep(60)  # initial delay before first check
+    ready = await wait_for_stand_ready(ip_address)
+    access_url = domain_name or ip_address
+    dm_channel = await get_dm_channel(user_id)
+    if ready:
+        await post_message(
+            dm_channel,
+            f"✅ Тестовый стенд **{service}** ({droplet_name}) готов!\nАдрес: http://{access_url}",
+        )
+    else:
+        await post_message(
+            dm_channel,
+            f"⚠️ Тестовый стенд **{service}** ({droplet_name}) не отвечает после 20 минут.\n"
+            f"Проверьте вручную: `ssh root@{ip_address}` → `tail -f /var/log/cloud-init-output.log`",
+        )
 
 
 # ============================================================

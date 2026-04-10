@@ -36,6 +36,7 @@ from modules.create_test_instance import (
     wait_for_action,
     build_stand_user_data,
     get_latest_ubuntu_image,
+    wait_for_stand_ready,
     DROPLET_TYPES,
 )
 from modules.create_k8s_cluster import (
@@ -1635,7 +1636,7 @@ async def _create_stand(message, user, context, droplet_name) -> int:
         record_ssh_key_usage(user_id, data["ssh_key_ids"])
 
         # Append setup time note
-        result["message"] += "\n\nНастройка стенда займёт 5\\-15 минут после загрузки VM\\."
+        result["message"] += "\n\nНастройка стенда займёт 5\\-15 минут\\. Уведомлю, когда будет готов\\."
 
         await message.reply_text(result["message"], parse_mode="MarkdownV2")
         await send_notification(
@@ -1651,11 +1652,50 @@ async def _create_stand(message, user, context, droplet_name) -> int:
             domain_name=domain_name,
             price_monthly=data.get("price_monthly"),
         )
+
+        # Schedule background readiness check
+        context.job_queue.run_once(
+            _poll_stand_ready,
+            when=60,  # start checking after 60s
+            data={
+                "ip_address": result["ip_address"],
+                "droplet_name": result["droplet_name"],
+                "service": service,
+                "chat_id": message.chat_id,
+                "domain_name": domain_name,
+            },
+        )
     else:
         await message.reply_text(f"Ошибка: {result['message']}")
 
     context.user_data.clear()
     return ConversationHandler.END
+
+
+async def _poll_stand_ready(context: ContextTypes.DEFAULT_TYPE):
+    """Background job: poll test stand HTTP endpoint and notify when ready."""
+    job_data = context.job.data
+    ip = job_data["ip_address"]
+    name = job_data["droplet_name"]
+    service = job_data["service"]
+    chat_id = job_data["chat_id"]
+    domain = job_data.get("domain_name")
+
+    ready = await wait_for_stand_ready(ip)
+    access_url = domain or ip
+    if ready:
+        await context.bot.send_message(
+            chat_id,
+            f"✅ Тестовый стенд **{service}** ({name}) готов!\nАдрес: http://{access_url}",
+            parse_mode="Markdown",
+        )
+    else:
+        await context.bot.send_message(
+            chat_id,
+            f"⚠️ Тестовый стенд **{service}** ({name}) не отвечает после 20 минут.\n"
+            f"Проверьте вручную: `ssh root@{ip}` → `tail -f /var/log/cloud-init-output.log`",
+            parse_mode="Markdown",
+        )
 
 
 # --- Background job ---
