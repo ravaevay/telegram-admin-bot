@@ -178,7 +178,7 @@ def build_stand_user_data(service, ds_tag="latest", service_tag="latest", domain
     return (
         "#cloud-config\n"
         "runcmd:\n"
-        f"  - git clone -b master https://github.com/ONLYOFFICE/services4integration.git --depth=1 /app\n"
+        f"  - git clone -b main https://github.com/ONLYOFFICE/services4integration.git --depth=1 /app\n"
         f"  - {cmd}\n"
     )
 
