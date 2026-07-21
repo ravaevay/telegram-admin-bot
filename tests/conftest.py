@@ -29,6 +29,8 @@ os.environ.setdefault("MM_AUTHORIZED_DROPLET_USERS", "")
 os.environ.setdefault("MM_AUTHORIZED_K8S_USERS", "")
 os.environ.setdefault("MM_AUTHORIZED_STAND_USERS", "")
 os.environ.setdefault("MM_NOTIFICATION_CHANNEL_ID", "")
+os.environ.setdefault("GITEA_URL", "https://gitea.test")
+os.environ.setdefault("GITEA_TOKEN", "fake-gitea-token")
 
 # Add src/ to sys.path so test imports work
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
