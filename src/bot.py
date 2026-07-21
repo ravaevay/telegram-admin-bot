@@ -1,4 +1,5 @@
 import io
+import json
 import logging
 import re
 from warnings import filterwarnings
@@ -20,9 +21,7 @@ from config import (
     BOT_TOKEN,
     SSH_CONFIG,
     DIGITALOCEAN_TOKEN,
-    STAND_SERVICES,
-    STAND_DEFAULT_DS_TAG,
-    STAND_DROPLET_TYPES,
+    GITEA_TOKEN,
 )
 from modules.create_test_instance import (
     create_droplet,
@@ -34,10 +33,17 @@ from modules.create_test_instance import (
     create_dns_record,
     delete_droplet,
     wait_for_action,
-    build_stand_user_data,
-    get_latest_ubuntu_image,
-    wait_for_stand_ready,
     DROPLET_TYPES,
+)
+from modules.gitea_stands import (
+    STAND_CATALOG,
+    STAND_POLL_INTERVAL_SECONDS,
+    STAND_DEPLOY_TIMEOUT_SECONDS,
+    build_stand_fqdn,
+    build_stand_url,
+    deploy_stand,
+    destroy_stand,
+    get_run_status,
 )
 from modules.create_k8s_cluster import (
     create_k8s_cluster,
@@ -63,10 +69,19 @@ from modules.database import (
     get_k8s_cluster_by_id,
     update_k8s_cluster_status,
     extend_k8s_cluster_expiration,
+    save_stand,
+    get_stand_by_id,
+    get_stands_by_creator,
+    get_expiring_stands,
+    get_deploying_stands,
+    get_destroying_stands,
+    update_stand_status,
+    extend_stand_expiration,
+    delete_stand,
 )
 from modules.mail import create_mailbox, generate_password, reset_password
-from modules.notifications import send_notification, send_k8s_notification
-from datetime import datetime
+from modules.notifications import send_notification, send_k8s_notification, send_stand_notification
+from datetime import datetime, timedelta
 
 # Suppress PTBUserWarning for CallbackQueryHandler in ConversationHandler
 filterwarnings(action="ignore", message=r".*CallbackQueryHandler", category=PTBUserWarning)
@@ -89,16 +104,16 @@ SELECT_SSH_KEY, SELECT_IMAGE, SELECT_DNS_ZONE, INPUT_SUBDOMAIN, SELECT_TYPE, SEL
 MANAGE_LIST, MANAGE_ACTION, MANAGE_EXTEND, MANAGE_CONFIRM_DELETE = range(100, 104)
 K8S_SELECT_VERSION, K8S_SELECT_NODE_SIZE, K8S_SELECT_NODE_COUNT, K8S_SELECT_DURATION, K8S_INPUT_NAME = range(200, 205)
 K8S_MANAGE_LIST, K8S_MANAGE_ACTION, K8S_MANAGE_EXTEND, K8S_MANAGE_CONFIRM_DELETE = range(205, 209)
-(
-    STAND_SELECT_SERVICE,
-    STAND_SELECT_DS_TAG,
-    STAND_SELECT_SSH_KEY,
-    STAND_SELECT_DNS_ZONE,
-    STAND_INPUT_SUBDOMAIN,
-    STAND_SELECT_TYPE,
-    STAND_SELECT_DURATION,
-    STAND_INPUT_NAME,
-) = range(300, 308)
+STAND_SELECT_SERVICE, STAND_INPUT_SUBDOMAIN, STAND_INPUT_PARAM, STAND_SELECT_DURATION = range(300, 304)
+STAND_MANAGE_ACTION, STAND_MANAGE_EXTEND, STAND_MANAGE_CONFIRM_DELETE = range(310, 313)
+
+STAND_STATUS_LABELS = {
+    "deploying": "деплоится",
+    "active": "активен",
+    "deploy_failed": "ошибка деплоя",
+    "destroying": "удаляется",
+    "destroy_failed": "ошибка удаления",
+}
 
 # Track users who initiated /start in group chats
 allowed_users = set()
@@ -130,6 +145,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         [InlineKeyboardButton("☸️ Создать K8s кластер", callback_data="create_k8s")],
         [InlineKeyboardButton("☸️ Мои K8s кластеры", callback_data="manage_k8s")],
         [InlineKeyboardButton("🔧 Создать тестовый стенд", callback_data="create_stand")],
+        [InlineKeyboardButton("🔧 Мои стенды", callback_data="manage_stands")],
     ]
     reply_markup = InlineKeyboardMarkup(keyboard)
     await update.message.reply_text("Добро пожаловать! Выберите действие:", reply_markup=reply_markup)
@@ -723,14 +739,11 @@ async def _show_droplet_list(message, user_id) -> int:
             except (ValueError, TypeError):
                 pass
 
-        stand_line = f"Стенд: {inst['stand_type']}\n" if inst.get("stand_type") else ""
-
         text = (
             f"Имя: {inst['name']}\n"
             f"IP: {inst['ip_address']}\n"
             f"{dns_line}"
             f"Тип: {type_label}\n"
-            f"{stand_line}"
             f"{cost_line}"
             f"Срок действия: {inst['expiration_date']}"
         )
@@ -1240,25 +1253,7 @@ async def k8s_manage_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) 
     return ConversationHandler.END
 
 
-# --- Test stand creation conversation ---
-
-
-def _build_stand_ssh_key_keyboard(keys, selected_ids, expanded):
-    """Построить inline-клавиатуру для мультивыбора SSH-ключей (стенд)."""
-    visible_keys = keys if expanded or len(keys) <= 3 else keys[:3]
-    keyboard = []
-    for key in visible_keys:
-        key_id = str(key["id"])
-        prefix = "✅" if key_id in selected_ids else "⬜"
-        keyboard.append([InlineKeyboardButton(f"{prefix} {key['name']}", callback_data=f"stand_ssh_toggle_{key_id}")])
-
-    if not expanded and len(keys) > 3:
-        remaining = len(keys) - 3
-        keyboard.append([InlineKeyboardButton(f"Другие ключи ({remaining})", callback_data="stand_ssh_more_keys")])
-
-    count = len(selected_ids)
-    keyboard.append([InlineKeyboardButton(f"Продолжить ✓ ({count})", callback_data="stand_ssh_confirm")])
-    return InlineKeyboardMarkup(keyboard)
+# --- Test stand creation conversation (Gitea Actions) ---
 
 
 async def stand_entry(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
@@ -1276,204 +1271,37 @@ async def stand_entry(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int
         await query.message.reply_text("У вас нет прав для создания тестовых стендов.")
         return ConversationHandler.END
 
-    keyboard = [[InlineKeyboardButton(service, callback_data=f"stand_svc_{service}")] for service in STAND_SERVICES]
+    if not GITEA_TOKEN:
+        await query.message.reply_text("Стенды не настроены: не задан GITEA_TOKEN.")
+        return ConversationHandler.END
+
+    keyboard = [[InlineKeyboardButton(service, callback_data=f"stand_svc_{service}")] for service in STAND_CATALOG]
     reply_markup = InlineKeyboardMarkup(keyboard)
     await query.message.reply_text("Выберите сервис для тестового стенда:", reply_markup=reply_markup)
     return STAND_SELECT_SERVICE
 
 
 async def stand_select_service(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    """Выбор сервиса — переход к выбору версии Document Server."""
+    """Выбор сервиса — переход к вводу субдомена."""
     query = update.callback_query
     await query.answer()
 
     service = query.data.removeprefix("stand_svc_")
+    if service not in STAND_CATALOG:
+        await query.message.reply_text("Неизвестный сервис.")
+        return ConversationHandler.END
+
     context.user_data["stand_service"] = service
-
-    keyboard = [
-        [InlineKeyboardButton("latest (по умолчанию)", callback_data="stand_ds_latest")],
-        [InlineKeyboardButton("Указать версию", callback_data="stand_ds_custom")],
-    ]
-    reply_markup = InlineKeyboardMarkup(keyboard)
-    await query.message.reply_text(f"Сервис: {service}\nВыберите версию Document Server:", reply_markup=reply_markup)
-    return STAND_SELECT_DS_TAG
-
-
-async def stand_ds_tag_choice(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    """Выбор версии DS — latest или пользовательская."""
-    query = update.callback_query
-    await query.answer()
-
-    if query.data == "stand_ds_latest":
-        context.user_data["stand_ds_tag"] = STAND_DEFAULT_DS_TAG
-        return await _stand_show_ssh_keys(query, context)
-
-    # stand_ds_custom — ask for text input
-    await query.message.reply_text("Введите версию Document Server (например, 8.0.1):")
-    return STAND_SELECT_DS_TAG
-
-
-async def stand_input_ds_tag(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    """Текстовый ввод версии Document Server."""
-    ds_tag = update.message.text.strip()
-    if not ds_tag:
-        await update.message.reply_text("Версия не может быть пустой. Попробуйте ещё раз:")
-        return STAND_SELECT_DS_TAG
-
-    context.user_data["stand_ds_tag"] = ds_tag
-
-    # Text input has no callback query, respond via message
-    user_id = update.effective_user.id
-    result = await get_ssh_keys(DIGITALOCEAN_TOKEN)
-    if not result["success"]:
-        await update.message.reply_text(f"Ошибка: {result['message']}")
-        return ConversationHandler.END
-
-    ssh_keys = result["keys"]
-    if not ssh_keys:
-        await update.message.reply_text("Нет доступных SSH-ключей в DigitalOcean.")
-        return ConversationHandler.END
-
-    preferred_ids = get_preferred_ssh_keys(user_id)
-    if preferred_ids:
-        available_ids = {k["id"] for k in ssh_keys}
-        valid_preferred = [pid for pid in preferred_ids if pid in available_ids]
-        preferred_set = set(valid_preferred)
-        preferred_keys = [k for pid in valid_preferred for k in ssh_keys if k["id"] == pid]
-        remaining_keys = [k for k in ssh_keys if k["id"] not in preferred_set]
-        ssh_keys = preferred_keys + remaining_keys
-        preselect = {str(pid) for pid in valid_preferred[:3]}
-    else:
-        preselect = {str(k["id"]) for k in ssh_keys[:3]}
-
-    context.user_data["ssh_keys_list"] = ssh_keys
-    context.user_data["selected_ssh_keys"] = preselect
-    context.user_data["ssh_keys_expanded"] = False
-
-    reply_markup = _build_stand_ssh_key_keyboard(ssh_keys, preselect, False)
-    await update.message.reply_text("Выберите SSH ключи:", reply_markup=reply_markup)
-    return STAND_SELECT_SSH_KEY
-
-
-async def _stand_show_ssh_keys(query, context) -> int:
-    """Показать SSH-ключи для выбора (стенд)."""
-    user_id = query.from_user.id
-    result = await get_ssh_keys(DIGITALOCEAN_TOKEN)
-    if not result["success"]:
-        await query.message.reply_text(f"Ошибка: {result['message']}")
-        return ConversationHandler.END
-
-    ssh_keys = result["keys"]
-    if not ssh_keys:
-        await query.message.reply_text("Нет доступных SSH-ключей в DigitalOcean.")
-        return ConversationHandler.END
-
-    preferred_ids = get_preferred_ssh_keys(user_id)
-    if preferred_ids:
-        available_ids = {k["id"] for k in ssh_keys}
-        valid_preferred = [pid for pid in preferred_ids if pid in available_ids]
-        preferred_set = set(valid_preferred)
-        preferred_keys = [k for pid in valid_preferred for k in ssh_keys if k["id"] == pid]
-        remaining_keys = [k for k in ssh_keys if k["id"] not in preferred_set]
-        ssh_keys = preferred_keys + remaining_keys
-        preselect = {str(pid) for pid in valid_preferred[:3]}
-    else:
-        preselect = {str(k["id"]) for k in ssh_keys[:3]}
-
-    context.user_data["ssh_keys_list"] = ssh_keys
-    context.user_data["selected_ssh_keys"] = preselect
-    context.user_data["ssh_keys_expanded"] = False
-
-    reply_markup = _build_stand_ssh_key_keyboard(ssh_keys, preselect, False)
-    await query.message.reply_text("Выберите SSH ключи:", reply_markup=reply_markup)
-    return STAND_SELECT_SSH_KEY
-
-
-async def stand_toggle_ssh_key(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    """Переключение выбора SSH-ключа (стенд)."""
-    query = update.callback_query
-    await query.answer()
-
-    key_id = query.data.removeprefix("stand_ssh_toggle_")
-    selected = context.user_data.get("selected_ssh_keys", set())
-
-    if key_id in selected:
-        selected.discard(key_id)
-    else:
-        selected.add(key_id)
-
-    context.user_data["selected_ssh_keys"] = selected
-    reply_markup = _build_stand_ssh_key_keyboard(
-        context.user_data["ssh_keys_list"], selected, context.user_data.get("ssh_keys_expanded", False)
+    await query.message.reply_text(
+        f"Сервис: {service}\n\n"
+        f"Введите субдомен — стенд будет доступен как {build_stand_fqdn('<субдомен>')}\n"
+        f"(латинские буквы, цифры и дефис):"
     )
-    await query.edit_message_reply_markup(reply_markup=reply_markup)
-    return STAND_SELECT_SSH_KEY
-
-
-async def stand_expand_ssh_keys(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    """Раскрыть полный список SSH-ключей (стенд)."""
-    query = update.callback_query
-    await query.answer()
-
-    context.user_data["ssh_keys_expanded"] = True
-    reply_markup = _build_stand_ssh_key_keyboard(
-        context.user_data["ssh_keys_list"], context.user_data.get("selected_ssh_keys", set()), True
-    )
-    await query.edit_message_reply_markup(reply_markup=reply_markup)
-    return STAND_SELECT_SSH_KEY
-
-
-async def stand_confirm_ssh_keys(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    """Подтверждение SSH-ключей — переход к DNS-зонам (стенд)."""
-    query = update.callback_query
-
-    selected = context.user_data.get("selected_ssh_keys", set())
-    if not selected:
-        await query.answer("Выберите хотя бы один SSH-ключ", show_alert=True)
-        return STAND_SELECT_SSH_KEY
-
-    await query.answer()
-
-    context.user_data["ssh_key_ids"] = [int(k) for k in selected]
-    context.user_data.pop("ssh_keys_list", None)
-    context.user_data.pop("selected_ssh_keys", None)
-    context.user_data.pop("ssh_keys_expanded", None)
-
-    return await _stand_show_dns_zones(query.message)
-
-
-async def _stand_show_dns_zones(message) -> int:
-    """Показать DNS-зоны для выбора (стенд)."""
-    result = await get_domains(DIGITALOCEAN_TOKEN)
-    if result["success"] and result["domains"]:
-        keyboard = [[InlineKeyboardButton(domain, callback_data=f"stand_dns_{domain}")] for domain in result["domains"]]
-        keyboard.append([InlineKeyboardButton("Пропустить (без DNS)", callback_data="stand_dns_skip")])
-        reply_markup = InlineKeyboardMarkup(keyboard)
-        await message.reply_text("Выберите DNS-зону для создания записи:", reply_markup=reply_markup)
-        return STAND_SELECT_DNS_ZONE
-
-    # No domains or error — skip DNS, proceed to type selection
-    return await _stand_show_type_keyboard(message)
-
-
-async def stand_select_dns_zone(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    """Выбор DNS-зоны — переход к вводу субдомена или выбору типа (стенд)."""
-    query = update.callback_query
-    await query.answer()
-
-    zone = query.data.removeprefix("stand_dns_")
-    if zone == "skip":
-        context.user_data["dns_zone"] = None
-        context.user_data["subdomain"] = None
-        return await _stand_show_type_keyboard(query.message)
-
-    context.user_data["dns_zone"] = zone
-    await query.message.reply_text(f"Введите имя субдомена для зоны {zone}:")
     return STAND_INPUT_SUBDOMAIN
 
 
 async def stand_input_subdomain(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    """Получение субдомена — переход к выбору типа (стенд)."""
+    """Получение субдомена — переход к параметрам workflow."""
     subdomain = update.message.text.strip().lower()
 
     if not SUBDOMAIN_RE.match(subdomain):
@@ -1483,219 +1311,594 @@ async def stand_input_subdomain(update: Update, context: ContextTypes.DEFAULT_TY
         )
         return STAND_INPUT_SUBDOMAIN
 
-    context.user_data["subdomain"] = subdomain
-    return await _stand_show_type_keyboard(update.message)
+    context.user_data["stand_subdomain"] = subdomain
+    service = context.user_data["stand_service"]
+    context.user_data["stand_param_queue"] = STAND_CATALOG[service]["inputs"]
+    context.user_data["stand_param_index"] = 0
+    context.user_data["stand_inputs"] = {}
+
+    return await _stand_ask_next_param(update.message, context)
 
 
-async def _stand_show_type_keyboard(message) -> int:
-    """Показать клавиатуру выбора типа VM для стенда с ценами."""
-    sizes = await get_sizes(DIGITALOCEAN_TOKEN)
+async def _stand_ask_next_param(message, context) -> int:
+    """Запросить следующий параметр workflow или перейти к выбору длительности."""
+    queue = context.user_data.get("stand_param_queue", [])
+    index = context.user_data.get("stand_param_index", 0)
 
-    keyboard = []
-    for slug, label in STAND_DROPLET_TYPES.items():
-        price_info = sizes.get(slug)
-        if price_info:
-            btn_text = f"{label} — ${price_info['price_monthly']}/мес"
-        else:
-            btn_text = label
-        keyboard.append([InlineKeyboardButton(btn_text, callback_data=f"stand_type_{slug}")])
+    if index >= len(queue):
+        return await _stand_show_duration(message)
 
-    reply_markup = InlineKeyboardMarkup(keyboard)
-    await message.reply_text("Выберите размер VM для стенда:", reply_markup=reply_markup)
-    return STAND_SELECT_TYPE
+    param = queue[index]
+    if param["type"] == "choice":
+        keyboard = []
+        for i, option in enumerate(param["options"]):
+            label = f"{option} (по умолчанию)" if option == param["default"] else option
+            keyboard.append([InlineKeyboardButton(label, callback_data=f"stand_par_opt_{i}")])
+        await message.reply_text(f"{param['label']}:", reply_markup=InlineKeyboardMarkup(keyboard))
+    else:
+        keyboard = [[InlineKeyboardButton(f"По умолчанию: {param['default']}", callback_data="stand_par_def")]]
+        await message.reply_text(
+            f"{param['label']} — введите значение или используйте вариант по умолчанию:",
+            reply_markup=InlineKeyboardMarkup(keyboard),
+        )
+    return STAND_INPUT_PARAM
 
 
-async def stand_select_type(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    """Выбор типа VM — переход к выбору длительности (стенд)."""
+def _stand_store_param(context, value):
+    """Сохранить значение текущего параметра и сдвинуть очередь."""
+    queue = context.user_data["stand_param_queue"]
+    index = context.user_data["stand_param_index"]
+    context.user_data["stand_inputs"][queue[index]["name"]] = value
+    context.user_data["stand_param_index"] = index + 1
+
+
+async def stand_param_default(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Кнопка «По умолчанию» для текстового параметра."""
     query = update.callback_query
     await query.answer()
 
-    droplet_type = query.data.removeprefix("stand_type_")
-    context.user_data["droplet_type"] = droplet_type
+    queue = context.user_data.get("stand_param_queue", [])
+    index = context.user_data.get("stand_param_index", 0)
+    if index >= len(queue):
+        return await _stand_show_duration(query.message)
 
-    sizes = await get_sizes(DIGITALOCEAN_TOKEN)
-    price_info = sizes.get(droplet_type)
-    if price_info:
-        context.user_data["price_monthly"] = price_info["price_monthly"]
-        context.user_data["price_hourly"] = price_info["price_hourly"]
-        hourly = price_info["price_hourly"]
-        durations = [
-            ("1 день", 1),
-            ("3 дня", 3),
-            ("Неделя", 7),
-            ("2 недели", 14),
-            ("Месяц", 30),
-        ]
-        keyboard = [
-            [InlineKeyboardButton(f"{label} — ~${hourly * 24 * days:.2f}", callback_data=f"stand_dur_{days}")]
-            for label, days in durations
-        ]
-    else:
-        context.user_data["price_monthly"] = None
-        context.user_data["price_hourly"] = None
-        keyboard = [
-            [InlineKeyboardButton("1 день", callback_data="stand_dur_1")],
-            [InlineKeyboardButton("3 дня", callback_data="stand_dur_3")],
-            [InlineKeyboardButton("Неделя", callback_data="stand_dur_7")],
-            [InlineKeyboardButton("2 недели", callback_data="stand_dur_14")],
-            [InlineKeyboardButton("Месяц", callback_data="stand_dur_30")],
-        ]
+    _stand_store_param(context, queue[index]["default"])
+    return await _stand_ask_next_param(query.message, context)
 
-    reply_markup = InlineKeyboardMarkup(keyboard)
-    await query.message.reply_text("Выберите длительность аренды стенда:", reply_markup=reply_markup)
+
+async def stand_param_option(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Выбор варианта choice-параметра."""
+    query = update.callback_query
+    await query.answer()
+
+    queue = context.user_data.get("stand_param_queue", [])
+    index = context.user_data.get("stand_param_index", 0)
+    if index >= len(queue):
+        return await _stand_show_duration(query.message)
+
+    option_index = int(query.data.removeprefix("stand_par_opt_"))
+    options = queue[index].get("options", [])
+    if not 0 <= option_index < len(options):
+        await query.message.reply_text("Некорректный вариант, попробуйте ещё раз.")
+        return STAND_INPUT_PARAM
+
+    _stand_store_param(context, options[option_index])
+    return await _stand_ask_next_param(query.message, context)
+
+
+async def stand_param_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Текстовый ввод значения параметра."""
+    value = update.message.text.strip()
+    if not value:
+        await update.message.reply_text("Значение не может быть пустым. Попробуйте ещё раз:")
+        return STAND_INPUT_PARAM
+
+    queue = context.user_data.get("stand_param_queue", [])
+    index = context.user_data.get("stand_param_index", 0)
+    if index >= len(queue):
+        return await _stand_show_duration(update.message)
+
+    _stand_store_param(context, value)
+    return await _stand_ask_next_param(update.message, context)
+
+
+async def _stand_show_duration(message) -> int:
+    """Показать клавиатуру выбора длительности аренды стенда."""
+    keyboard = [
+        [InlineKeyboardButton("1 день", callback_data="stand_dur_1")],
+        [InlineKeyboardButton("3 дня", callback_data="stand_dur_3")],
+        [InlineKeyboardButton("Неделя", callback_data="stand_dur_7")],
+        [InlineKeyboardButton("2 недели", callback_data="stand_dur_14")],
+        [InlineKeyboardButton("Месяц", callback_data="stand_dur_30")],
+    ]
+    await message.reply_text("Выберите длительность аренды стенда:", reply_markup=InlineKeyboardMarkup(keyboard))
     return STAND_SELECT_DURATION
 
 
 async def stand_select_duration(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    """Выбор длительности — запрос имени или создание с FQDN (стенд)."""
+    """Выбор длительности и запуск деплоя стенда."""
     query = update.callback_query
     await query.answer()
 
     duration = int(query.data.removeprefix("stand_dur_"))
-    context.user_data["duration"] = duration
+    context.user_data["stand_duration"] = duration
 
-    dns_zone = context.user_data.get("dns_zone")
-    subdomain = context.user_data.get("subdomain")
-    if dns_zone and subdomain:
-        droplet_name = f"{subdomain}.{dns_zone}"
-        return await _create_stand(query.message, query.from_user, context, droplet_name)
-
-    await query.message.reply_text("Введите имя для стенда:")
-    return STAND_INPUT_NAME
+    return await _create_stand(query.message, query.from_user, context)
 
 
-async def stand_input_name(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    """Получение имени и создание стенда."""
-    droplet_name = update.message.text.strip()
-
-    if not DROPLET_NAME_RE.match(droplet_name):
-        await update.message.reply_text(
-            "Недопустимое имя. Используйте латинские буквы, цифры, точку, дефис или подчёркивание "
-            "(2-255 символов, начинается и заканчивается буквой или цифрой).\nПопробуйте ещё раз:"
-        )
-        return STAND_INPUT_NAME
-
-    return await _create_stand(update.message, update.effective_user, context, droplet_name)
-
-
-async def _create_stand(message, user, context, droplet_name) -> int:
-    """Общая логика создания тестового стенда."""
-    user_id = user.id
-    creator_username = f"@{user.username}" if user.username else user.first_name
-    creator_tag = user.username or user.first_name
+async def _create_stand(message, user, context) -> int:
+    """Диспатч deploy-workflow и сохранение стенда в БД."""
     data = context.user_data
-
     service = data["stand_service"]
-    ds_tag = data.get("stand_ds_tag", STAND_DEFAULT_DS_TAG)
+    subdomain = data["stand_subdomain"]
+    extra_inputs = data.get("stand_inputs", {})
+    duration = data["stand_duration"]
+    creator_username = f"@{user.username}" if user.username else user.first_name
 
-    # Determine domain_name for cloud-init (FQDN or None)
-    dns_zone = data.get("dns_zone")
-    subdomain = data.get("subdomain")
-    fqdn = f"{subdomain}.{dns_zone}" if dns_zone and subdomain else None
+    await message.reply_text("Запускаю деплой стенда...")
 
-    user_data_script = build_stand_user_data(service, ds_tag=ds_tag, domain_name=fqdn)
-
-    image = await get_latest_ubuntu_image(DIGITALOCEAN_TOKEN)
-    if not image:
-        await message.reply_text("Не удалось получить образ Ubuntu из DigitalOcean.")
+    result = await deploy_stand(service, subdomain, extra_inputs)
+    if not result["success"]:
+        await message.reply_text(f"Ошибка запуска деплоя: {result['message']}")
+        context.user_data.clear()
         return ConversationHandler.END
 
-    result = await create_droplet(
-        DIGITALOCEAN_TOKEN,
-        droplet_name,
-        data["ssh_key_ids"],
-        data["droplet_type"],
-        image,
-        data["duration"],
-        creator_id=user_id,
+    url = build_stand_url(service, subdomain)
+    now = datetime.now()
+    expiration_date = (now + timedelta(days=duration)).strftime("%Y-%m-%d %H:%M:%S")
+    created_at = now.strftime("%Y-%m-%d %H:%M:%S")
+
+    stand_id = save_stand(
+        service=service,
+        subdomain=subdomain,
+        url=url,
+        status="deploying",
+        deploy_run_id=result.get("run_id"),
+        deploy_run_url=result.get("run_url"),
+        inputs_json=json.dumps(extra_inputs),
+        creator_id=user.id,
         creator_username=creator_username,
-        price_monthly=data.get("price_monthly"),
-        creator_tag=creator_tag,
-        price_hourly=data.get("price_hourly"),
-        user_data=user_data_script,
-        stand_type=service,
+        expiration_date=expiration_date,
+        created_at=created_at,
+        platform="telegram",
+    )
+    if stand_id is None:
+        await message.reply_text(
+            "Деплой запущен, но не удалось сохранить стенд в базе — автоудаление работать не будет."
+        )
+
+    params_text = "\n".join(f"{k}: {v}" for k, v in extra_inputs.items())
+    params_block = f"\nПараметры:\n{params_text}\n" if params_text else "\n"
+    run_line = f"Ран: {result['run_url']}\n" if result.get("run_url") else ""
+    await message.reply_text(
+        f"Стенд создаётся!\n\n"
+        f"Сервис: {service}\n"
+        f"Адрес: {url}\n"
+        f"{run_line}"
+        f"{params_block}"
+        f"Срок действия: {expiration_date}\n\n"
+        f"Деплой займёт 10-30 минут. Уведомлю, когда стенд будет готов."
     )
 
-    domain_name = None
-    if result["success"]:
-        # Create DNS record (if zone and subdomain are set)
-        if dns_zone and subdomain:
-            dns_result = await create_dns_record(DIGITALOCEAN_TOKEN, dns_zone, subdomain, result["ip_address"])
-            if dns_result["success"]:
-                domain_name = dns_result["fqdn"]
-                update_instance_dns(
-                    result["droplet_id"],
-                    domain_name,
-                    dns_result["record_id"],
-                    dns_zone,
-                )
-                result["message"] += f"\nDNS: `{domain_name}`"
-            else:
-                await message.reply_text(f"Стенд создан, но DNS-запись не удалось создать: {dns_result['message']}")
-
-        record_ssh_key_usage(user_id, data["ssh_key_ids"])
-
-        # Append setup time note
-        result["message"] += "\n\nНастройка стенда займёт 5\\-15 минут\\. Уведомлю, когда будет готов\\."
-
-        await message.reply_text(result["message"], parse_mode="MarkdownV2")
-        await send_notification(
-            context.bot,
-            action="created",
-            droplet_name=result["droplet_name"],
-            ip_address=result["ip_address"],
-            droplet_type=data["droplet_type"],
-            expiration_date=result["expiration_date"],
-            creator_id=user_id,
-            duration=data["duration"],
-            creator_username=creator_username,
-            domain_name=domain_name,
-            price_monthly=data.get("price_monthly"),
-        )
-
-        # Schedule background readiness check
-        context.job_queue.run_once(
-            _poll_stand_ready,
-            when=60,  # start checking after 60s
-            data={
-                "ip_address": result["ip_address"],
-                "droplet_name": result["droplet_name"],
-                "service": service,
-                "chat_id": message.chat_id,
-                "domain_name": domain_name,
-            },
-        )
-    else:
-        await message.reply_text(f"Ошибка: {result['message']}")
+    await send_stand_notification(
+        context.bot,
+        action="created",
+        service=service,
+        subdomain=subdomain,
+        url=url,
+        expiration_date=expiration_date,
+        creator_id=user.id,
+        duration=duration,
+        creator_username=creator_username,
+        run_url=result.get("run_url"),
+    )
 
     context.user_data.clear()
     return ConversationHandler.END
 
 
-async def _poll_stand_ready(context: ContextTypes.DEFAULT_TYPE):
-    """Background job: poll test stand HTTP endpoint and notify when ready."""
-    job_data = context.job.data
-    ip = job_data["ip_address"]
-    name = job_data["droplet_name"]
-    service = job_data["service"]
-    chat_id = job_data["chat_id"]
-    domain = job_data.get("domain_name")
+# --- Stand management conversation ---
 
-    ready = await wait_for_stand_ready(ip)
-    access_url = domain or ip
-    if ready:
-        await context.bot.send_message(
-            chat_id,
-            f"✅ Тестовый стенд **{service}** ({name}) готов!\nАдрес: http://{access_url}",
-            parse_mode="Markdown",
+
+async def stand_manage_entry(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Показать список стендов пользователя."""
+    query = update.callback_query
+    user_id = query.from_user.id
+
+    if not _check_group_access(update, user_id):
+        await query.answer("У вас нет доступа к этой кнопке.", show_alert=True)
+        return ConversationHandler.END
+
+    await query.answer()
+
+    if not is_authorized(user_id, "stand"):
+        await query.message.reply_text("У вас нет прав для управления тестовыми стендами.")
+        return ConversationHandler.END
+
+    return await _show_stand_list(query.message, user_id)
+
+
+async def _show_stand_list(message, user_id) -> int:
+    """Показать список стендов пользователя с кнопками управления."""
+    stands = get_stands_by_creator(user_id)
+
+    if not stands:
+        await message.reply_text("У вас нет активных стендов.")
+        return ConversationHandler.END
+
+    for stand in stands:
+        status_label = STAND_STATUS_LABELS.get(stand["status"], stand["status"])
+        text = (
+            f"Сервис: {stand['service']}\n"
+            f"Адрес: {stand['url']}\n"
+            f"Статус: {status_label}\n"
+            f"Срок действия: {stand['expiration_date']}"
+        )
+        buttons = [InlineKeyboardButton("Продлить", callback_data=f"stand_my_extend_{stand['id']}")]
+        if stand["status"] != "destroying":
+            buttons.append(InlineKeyboardButton("Удалить", callback_data=f"stand_my_delete_{stand['id']}"))
+        await message.reply_text(text, reply_markup=InlineKeyboardMarkup([buttons]))
+
+    return STAND_MANAGE_ACTION
+
+
+async def stand_manage_extend_entry(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Выбор срока продления стенда."""
+    query = update.callback_query
+    await query.answer()
+
+    stand_id = int(query.data.removeprefix("stand_my_extend_"))
+    context.user_data["stand_manage_id"] = stand_id
+
+    keyboard = [
+        [InlineKeyboardButton("3 дня", callback_data="stand_ext_days_3")],
+        [InlineKeyboardButton("7 дней", callback_data="stand_ext_days_7")],
+    ]
+    await query.message.reply_text("На сколько продлить?", reply_markup=InlineKeyboardMarkup(keyboard))
+    return STAND_MANAGE_EXTEND
+
+
+async def stand_manage_extend_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Подтверждение продления стенда."""
+    query = update.callback_query
+    await query.answer()
+
+    days = int(query.data.removeprefix("stand_ext_days_"))
+    stand_id = context.user_data.get("stand_manage_id")
+    user_id = query.from_user.id
+
+    stand = get_stand_by_id(stand_id)
+    if not stand:
+        await query.message.reply_text("Стенд не найден.")
+        context.user_data.clear()
+        return ConversationHandler.END
+
+    new_exp = extend_stand_expiration(stand_id, days)
+    if new_exp:
+        await query.message.reply_text(f"Срок действия стенда продлён на {days} дней.")
+        await send_stand_notification(
+            context.bot,
+            action="extended",
+            service=stand["service"],
+            subdomain=stand["subdomain"],
+            url=stand["url"],
+            expiration_date=new_exp,
+            creator_id=user_id,
+            duration=days,
+            creator_username=stand.get("creator_username"),
         )
     else:
-        await context.bot.send_message(
-            chat_id,
-            f"⚠️ Тестовый стенд **{service}** ({name}) не отвечает после 20 минут.\n"
-            f"Проверьте вручную: `ssh root@{ip}` → `tail -f /var/log/cloud-init-output.log`",
-            parse_mode="Markdown",
+        await query.message.reply_text("Ошибка при продлении стенда.")
+
+    context.user_data.clear()
+    return ConversationHandler.END
+
+
+async def stand_manage_delete_entry(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Запрос подтверждения удаления стенда."""
+    query = update.callback_query
+    await query.answer()
+
+    stand_id = int(query.data.removeprefix("stand_my_delete_"))
+    context.user_data["stand_manage_id"] = stand_id
+
+    keyboard = [
+        [
+            InlineKeyboardButton("Да, удалить", callback_data=f"stand_confirm_delete_{stand_id}"),
+            InlineKeyboardButton("Отмена", callback_data="stand_cancel_delete"),
+        ]
+    ]
+    await query.message.reply_text(
+        "Вы уверены, что хотите удалить этот стенд?", reply_markup=InlineKeyboardMarkup(keyboard)
+    )
+    return STAND_MANAGE_CONFIRM_DELETE
+
+
+async def stand_manage_delete_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Подтверждение удаления стенда — диспатч destroy-workflow."""
+    query = update.callback_query
+    await query.answer()
+
+    stand_id = int(query.data.removeprefix("stand_confirm_delete_"))
+
+    stand = get_stand_by_id(stand_id)
+    if not stand:
+        await query.message.reply_text("Стенд не найден.")
+        context.user_data.clear()
+        return ConversationHandler.END
+
+    if stand["status"] == "destroying":
+        await query.message.reply_text("Стенд уже удаляется.")
+        context.user_data.clear()
+        return ConversationHandler.END
+
+    result = await _dispatch_stand_destroy(stand, auto=False)
+    if result["success"]:
+        await query.message.edit_text("Запущено удаление стенда. Сообщу, когда он будет удалён.")
+    else:
+        await query.message.reply_text(f"Ошибка запуска удаления: {result['message']}")
+
+    context.user_data.clear()
+    return ConversationHandler.END
+
+
+async def stand_manage_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Отмена удаления стенда."""
+    query = update.callback_query
+    await query.answer()
+    await query.message.reply_text("Удаление отменено.")
+    context.user_data.clear()
+    return ConversationHandler.END
+
+
+async def _dispatch_stand_destroy(stand, auto=False):
+    """Диспатч destroy-workflow и перевод стенда в статус 'destroying'."""
+    result = await destroy_stand(stand["service"], stand["subdomain"])
+    if result["success"]:
+        update_stand_status(stand["id"], "destroying", destroy_run_id=result.get("run_id"), auto_destroy=auto)
+        logger.info(f"Запущено удаление стенда {stand['service']}/{stand['subdomain']} (ID {stand['id']}).")
+    else:
+        logger.error(f"Не удалось запустить удаление стенда ID {stand['id']}: {result['message']}")
+    return result
+
+
+# --- Standalone stand callback handlers (extend / delete from background job notifications) ---
+
+
+async def handle_stand_extend(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Продление стенда из уведомления фоновой задачи."""
+    query = update.callback_query
+    user_id = query.from_user.id
+    try:
+        await query.answer()
+    except BadRequest:
+        pass
+
+    try:
+        # format: stand_extend_{days}_{stand_id}
+        parts = query.data.split("_")
+        days = int(parts[2])
+        stand_id = int(parts[3])
+    except (IndexError, ValueError):
+        await query.message.reply_text("Ошибка: некорректные данные запроса.")
+        return
+
+    stand = get_stand_by_id(stand_id)
+    if not stand:
+        await query.message.reply_text("Стенд не найден.")
+        return
+
+    if str(stand["creator_id"]) != str(user_id):
+        logger.warning(f"Пользователь {user_id} попытался продлить чужой стенд {stand_id}")
+        await query.message.reply_text("У вас нет прав для продления этого стенда.")
+        return
+
+    new_exp = extend_stand_expiration(stand_id, days)
+    if new_exp:
+        await query.message.reply_text(f"Срок действия стенда продлён на {days} дней.")
+        await send_stand_notification(
+            context.bot,
+            action="extended",
+            service=stand["service"],
+            subdomain=stand["subdomain"],
+            url=stand["url"],
+            expiration_date=new_exp,
+            creator_id=user_id,
+            duration=days,
+            creator_username=stand.get("creator_username"),
         )
+    else:
+        await query.message.reply_text("Ошибка при продлении стенда. Попробуйте позже.")
+
+
+async def handle_stand_delete(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Удаление стенда из уведомления фоновой задачи."""
+    query = update.callback_query
+    user_id = query.from_user.id
+    try:
+        await query.answer()
+    except BadRequest:
+        pass
+
+    try:
+        stand_id = int(query.data.removeprefix("stand_delete_"))
+    except ValueError:
+        await query.message.reply_text("Ошибка: некорректные данные запроса.")
+        return
+
+    stand = get_stand_by_id(stand_id)
+    if not stand:
+        await query.message.reply_text("Стенд не найден.")
+        return
+
+    if str(stand["creator_id"]) != str(user_id):
+        logger.warning(f"Пользователь {user_id} попытался удалить чужой стенд {stand_id}")
+        await query.message.reply_text("У вас нет прав для удаления этого стенда.")
+        return
+
+    if stand["status"] == "destroying":
+        await query.message.reply_text("Стенд уже удаляется.")
+        return
+
+    result = await _dispatch_stand_destroy(stand, auto=False)
+    if result["success"]:
+        await query.message.edit_text("Запущено удаление стенда. Сообщу, когда он будет удалён.")
+    else:
+        await query.message.reply_text(f"Ошибка запуска удаления: {result['message']}")
+
+
+# --- Stand background polling ---
+
+
+async def poll_stand_runs(context: ContextTypes.DEFAULT_TYPE):
+    """Поллинг Gitea Actions ранов деплоя/удаления стендов (Telegram-платформа)."""
+    for stand in get_deploying_stands(platform="telegram"):
+        try:
+            await _check_deploying_stand(context.bot, stand)
+        except Exception as e:
+            logger.error(f"Ошибка при проверке деплоя стенда {stand.get('id')}: {e}")
+
+    for stand in get_destroying_stands(platform="telegram"):
+        try:
+            await _check_destroying_stand(context.bot, stand)
+        except Exception as e:
+            logger.error(f"Ошибка при проверке удаления стенда {stand.get('id')}: {e}")
+
+
+def _stand_deploy_timed_out(stand):
+    """Проверка: прошло ли больше STAND_DEPLOY_TIMEOUT_SECONDS с момента создания."""
+    try:
+        created = datetime.strptime(stand["created_at"], "%Y-%m-%d %H:%M:%S")
+    except (KeyError, TypeError, ValueError):
+        return True
+    return (datetime.now() - created).total_seconds() > STAND_DEPLOY_TIMEOUT_SECONDS
+
+
+async def _check_deploying_stand(bot, stand):
+    """Проверить статус deploy-рана стенда, уведомить о готовности/ошибке."""
+    run_id = stand.get("deploy_run_id")
+
+    if run_id:
+        run = await get_run_status(run_id)
+        if not run["success"] or run["status"] != "completed":
+            if _stand_deploy_timed_out(stand):
+                await _mark_stand_deploy_failed(bot, stand, run_url=run.get("run_url") or stand.get("deploy_run_url"))
+            return
+
+        if run["conclusion"] == "success":
+            update_stand_status(stand["id"], "active")
+            try:
+                await bot.send_message(
+                    chat_id=stand["creator_id"],
+                    text=f"✅ Тестовый стенд {stand['service']} готов!\nАдрес: {stand['url']}",
+                )
+            except Exception as e:
+                logger.error(f"Ошибка отправки уведомления о готовности стенда {stand['id']}: {e}")
+            await send_stand_notification(
+                bot,
+                action="ready",
+                service=stand["service"],
+                subdomain=stand["subdomain"],
+                url=stand["url"],
+                expiration_date=stand["expiration_date"],
+                creator_id=stand["creator_id"],
+                creator_username=stand.get("creator_username"),
+            )
+        else:
+            await _mark_stand_deploy_failed(bot, stand, run_url=run.get("run_url"))
+    elif _stand_deploy_timed_out(stand):
+        # Run id was never correlated — give the deploy the full timeout, then fail.
+        await _mark_stand_deploy_failed(bot, stand, run_url=None)
+
+
+async def _mark_stand_deploy_failed(bot, stand, run_url=None):
+    """Перевести стенд в 'deploy_failed' и уведомить создателя."""
+    update_stand_status(stand["id"], "deploy_failed")
+    run_line = f"\nЛог: {run_url}" if run_url else ""
+    try:
+        await bot.send_message(
+            chat_id=stand["creator_id"],
+            text=f"⚠️ Деплой стенда {stand['service']} ({stand['subdomain']}) завершился с ошибкой.{run_line}",
+        )
+    except Exception as e:
+        logger.error(f"Ошибка отправки уведомления об ошибке деплоя стенда {stand['id']}: {e}")
+    await send_stand_notification(
+        bot,
+        action="errored",
+        service=stand["service"],
+        subdomain=stand["subdomain"],
+        url=stand["url"],
+        expiration_date=stand["expiration_date"],
+        creator_id=stand["creator_id"],
+        creator_username=stand.get("creator_username"),
+        run_url=run_url,
+    )
+
+
+async def _check_destroying_stand(bot, stand):
+    """Проверить статус destroy-рана стенда; удалить запись после успеха."""
+    run_id = stand.get("destroy_run_id")
+
+    if not run_id:
+        # Destroy dispatched but the run was never correlated — mark as failed so
+        # the user (or the expiry job) can retry; a repeated destroy is idempotent.
+        logger.warning(f"У стенда {stand['id']} нет destroy_run_id — помечаем destroy_failed для ретрая.")
+        await _mark_stand_destroy_failed(bot, stand, run_url=None)
+        return
+
+    run = await get_run_status(run_id)
+    if not run["success"] or run["status"] != "completed":
+        return
+
+    if run["conclusion"] == "success":
+        delete_stand(stand["id"])
+        action = "auto_deleted" if stand.get("auto_destroy") else "deleted"
+        try:
+            await bot.send_message(
+                chat_id=stand["creator_id"],
+                text=f"Тестовый стенд {stand['service']} ({stand['subdomain']}) удалён.",
+            )
+        except Exception as e:
+            logger.error(f"Ошибка отправки уведомления об удалении стенда {stand['id']}: {e}")
+        await send_stand_notification(
+            bot,
+            action=action,
+            service=stand["service"],
+            subdomain=stand["subdomain"],
+            url=stand["url"],
+            expiration_date=stand["expiration_date"],
+            creator_id=stand["creator_id"],
+            creator_username=stand.get("creator_username"),
+        )
+    else:
+        await _mark_stand_destroy_failed(bot, stand, run_url=run.get("run_url"))
+
+
+async def _mark_stand_destroy_failed(bot, stand, run_url=None):
+    """Перевести стенд в 'destroy_failed' и уведомить создателя."""
+    update_stand_status(stand["id"], "destroy_failed")
+    run_line = f"\nЛог: {run_url}" if run_url else ""
+    try:
+        await bot.send_message(
+            chat_id=stand["creator_id"],
+            text=(
+                f"⚠️ Не удалось удалить стенд {stand['service']} ({stand['subdomain']}).{run_line}\n"
+                f"Попробуйте удалить ещё раз через «Мои стенды»."
+            ),
+        )
+    except Exception as e:
+        logger.error(f"Ошибка отправки уведомления об ошибке удаления стенда {stand['id']}: {e}")
+    await send_stand_notification(
+        bot,
+        action="destroy_failed",
+        service=stand["service"],
+        subdomain=stand["subdomain"],
+        url=stand["url"],
+        expiration_date=stand["expiration_date"],
+        creator_id=stand["creator_id"],
+        creator_username=stand.get("creator_username"),
+        run_url=run_url,
+    )
 
 
 # --- Background job ---
@@ -1875,6 +2078,52 @@ async def notify_and_check_instances(context: ContextTypes.DEFAULT_TYPE):
 
         except Exception as e:
             logger.error(f"Ошибка при обработке K8s кластера {cluster}: {e}")
+
+    # --- Stands: expiry loop ---
+    for stand in get_expiring_stands(platform="telegram"):
+        try:
+            expiration_date = stand["expiration_date"]
+            if isinstance(expiration_date, str):
+                try:
+                    expiration_date = datetime.strptime(expiration_date, "%Y-%m-%d %H:%M:%S")
+                except ValueError:
+                    logger.error(f"Ошибка разбора даты стенда: {expiration_date}")
+                    continue
+
+            time_left = (expiration_date - datetime.now()).total_seconds()
+
+            if 0 < time_left <= 86400 and stand["status"] == "active":
+                try:
+                    user_chat = await context.bot.get_chat(stand["creator_id"])
+                    await user_chat.send_message(
+                        f"Тестовый стенд **{stand['service']}** ({stand['subdomain']}) будет удалён через 24 часа.\n"
+                        f"Хотите продлить срок действия или удалить его сейчас?",
+                        reply_markup=InlineKeyboardMarkup(
+                            [
+                                [
+                                    InlineKeyboardButton(
+                                        "Продлить на 3 дня", callback_data=f"stand_extend_3_{stand['id']}"
+                                    )
+                                ],
+                                [
+                                    InlineKeyboardButton(
+                                        "Продлить на 7 дней", callback_data=f"stand_extend_7_{stand['id']}"
+                                    )
+                                ],
+                                [InlineKeyboardButton("Удалить сейчас", callback_data=f"stand_delete_{stand['id']}")],
+                            ]
+                        ),
+                    )
+                    logger.info(f"Уведомление об истечении стенда {stand['id']} отправлено {stand['creator_id']}.")
+                except Exception as e:
+                    logger.error(f"Ошибка отправки уведомления об истечении стенда {stand['creator_id']}: {e}")
+
+            elif time_left <= 0 and stand["status"] in ("active", "deploy_failed", "destroy_failed"):
+                logger.info(f"Стенд {stand['service']}/{stand['subdomain']} истёк. Запускаем destroy...")
+                await _dispatch_stand_destroy(stand, auto=True)
+
+        except Exception as e:
+            logger.error(f"Ошибка при обработке стенда {stand}: {e}")
 
 
 async def poll_provisioning_clusters(context: ContextTypes.DEFAULT_TYPE):
@@ -2213,36 +2462,46 @@ def main():
         per_chat=True,
     )
 
-    # Conversation: test stand creation
+    # Conversation: test stand creation (Gitea Actions)
     stand_conv = ConversationHandler(
         entry_points=[CallbackQueryHandler(stand_entry, pattern=r"^create_stand$")],
         states={
             STAND_SELECT_SERVICE: [
                 CallbackQueryHandler(stand_select_service, pattern=r"^stand_svc_"),
             ],
-            STAND_SELECT_DS_TAG: [
-                CallbackQueryHandler(stand_ds_tag_choice, pattern=r"^stand_ds_"),
-                MessageHandler(filters.TEXT & ~filters.COMMAND, stand_input_ds_tag),
-            ],
-            STAND_SELECT_SSH_KEY: [
-                CallbackQueryHandler(stand_toggle_ssh_key, pattern=r"^stand_ssh_toggle_"),
-                CallbackQueryHandler(stand_expand_ssh_keys, pattern=r"^stand_ssh_more_keys$"),
-                CallbackQueryHandler(stand_confirm_ssh_keys, pattern=r"^stand_ssh_confirm$"),
-            ],
-            STAND_SELECT_DNS_ZONE: [
-                CallbackQueryHandler(stand_select_dns_zone, pattern=r"^stand_dns_"),
-            ],
             STAND_INPUT_SUBDOMAIN: [
                 MessageHandler(filters.TEXT & ~filters.COMMAND, stand_input_subdomain),
             ],
-            STAND_SELECT_TYPE: [
-                CallbackQueryHandler(stand_select_type, pattern=r"^stand_type_"),
+            STAND_INPUT_PARAM: [
+                CallbackQueryHandler(stand_param_default, pattern=r"^stand_par_def$"),
+                CallbackQueryHandler(stand_param_option, pattern=r"^stand_par_opt_"),
+                MessageHandler(filters.TEXT & ~filters.COMMAND, stand_param_text),
             ],
             STAND_SELECT_DURATION: [
                 CallbackQueryHandler(stand_select_duration, pattern=r"^stand_dur_"),
             ],
-            STAND_INPUT_NAME: [
-                MessageHandler(filters.TEXT & ~filters.COMMAND, stand_input_name),
+        },
+        fallbacks=[CommandHandler("cancel", cancel)],
+        allow_reentry=True,
+        conversation_timeout=CONVERSATION_TIMEOUT,
+        per_user=True,
+        per_chat=True,
+    )
+
+    # Conversation: stand management
+    stand_manage_conv = ConversationHandler(
+        entry_points=[CallbackQueryHandler(stand_manage_entry, pattern=r"^manage_stands$")],
+        states={
+            STAND_MANAGE_ACTION: [
+                CallbackQueryHandler(stand_manage_extend_entry, pattern=r"^stand_my_extend_"),
+                CallbackQueryHandler(stand_manage_delete_entry, pattern=r"^stand_my_delete_"),
+            ],
+            STAND_MANAGE_EXTEND: [
+                CallbackQueryHandler(stand_manage_extend_confirm, pattern=r"^stand_ext_days_"),
+            ],
+            STAND_MANAGE_CONFIRM_DELETE: [
+                CallbackQueryHandler(stand_manage_delete_confirm, pattern=r"^stand_confirm_delete_"),
+                CallbackQueryHandler(stand_manage_cancel, pattern=r"^stand_cancel_delete$"),
             ],
         },
         fallbacks=[CommandHandler("cancel", cancel)],
@@ -2261,15 +2520,19 @@ def main():
     app.add_handler(k8s_create_conv)
     app.add_handler(k8s_manage_conv)
     app.add_handler(stand_conv)
+    app.add_handler(stand_manage_conv)
     app.add_handler(CallbackQueryHandler(handle_extend, pattern=r"^extend_"))
     app.add_handler(CallbackQueryHandler(handle_delete, pattern=r"^delete_"))
     app.add_handler(CallbackQueryHandler(handle_k8s_extend, pattern=r"^k8s_extend_"))
     app.add_handler(CallbackQueryHandler(handle_k8s_delete, pattern=r"^k8s_delete_"))
+    app.add_handler(CallbackQueryHandler(handle_stand_extend, pattern=r"^stand_extend_"))
+    app.add_handler(CallbackQueryHandler(handle_stand_delete, pattern=r"^stand_delete_"))
 
     app.add_error_handler(error_handler)
 
     app.job_queue.run_repeating(notify_and_check_instances, interval=NOTIFY_INTERVAL_SECONDS)
     app.job_queue.run_repeating(poll_provisioning_clusters, interval=K8S_POLL_INTERVAL_SECONDS)
+    app.job_queue.run_repeating(poll_stand_runs, interval=STAND_POLL_INTERVAL_SECONDS)
 
     app.run_polling()
 
