@@ -24,7 +24,6 @@ async def send_notification(
     creator_username=None,
     domain_name=None,
     price_monthly=None,
-    stand_type=None,
 ):
     """Send notification to the channel about droplet events."""
     if not NOTIFICATION_CHANNEL_ID:
@@ -38,13 +37,11 @@ async def send_notification(
         if action == "created":
             dns_line = f"DNS: {domain_name}\n" if domain_name else ""
             cost_line = f"Стоимость: ~${price_monthly}/мес\n" if price_monthly else ""
-            stand_line = f"Тестовый стенд: {stand_type}\n" if stand_type else ""
             text = (
                 f"Новый инстанс создан\n\n"
                 f"Имя: {droplet_name}\n"
                 f"IP: {ip_address}\n"
                 f"{dns_line}"
-                f"{stand_line}"
                 f"Тип: {type_label}\n"
                 f"{cost_line}"
                 f"Срок действия: {expiration_date}\n"
@@ -177,3 +174,114 @@ async def send_k8s_notification(
         await bot.send_message(chat_id=NOTIFICATION_CHANNEL_ID, text=text)
     except Exception as e:
         logger.error(f"Ошибка отправки K8s уведомления: {e}")
+
+
+def build_stand_notification_text(
+    action,
+    service,
+    subdomain,
+    url,
+    expiration_date,
+    creator_id,
+    duration=None,
+    creator_username=None,
+    run_url=None,
+    bold="",
+):
+    """Build notification text about a test stand event (bold wraps the title)."""
+    display_name = creator_username or str(creator_id)
+    run_line = f"Ран: {run_url}\n" if run_url else ""
+
+    if action == "created":
+        return (
+            f"{bold}Новый тестовый стенд создаётся{bold}\n\n"
+            f"Сервис: {service}\n"
+            f"Субдомен: {subdomain}\n"
+            f"Адрес: {url}\n"
+            f"{run_line}"
+            f"Срок действия: {expiration_date}\n"
+            f"Создатель: {display_name}"
+        )
+    if action == "ready":
+        return (
+            f"{bold}Тестовый стенд готов{bold}\n\n"
+            f"Сервис: {service}\n"
+            f"Адрес: {url}\n"
+            f"Срок действия: {expiration_date}\n"
+            f"Создатель: {display_name}"
+        )
+    if action == "errored":
+        return (
+            f"{bold}Ошибка деплоя тестового стенда{bold}\n\n"
+            f"Сервис: {service}\n"
+            f"Субдомен: {subdomain}\n"
+            f"{run_line}"
+            f"Создатель: {display_name}"
+        )
+    if action == "extended":
+        duration_text = f"\nПродлён на: {duration} дн." if duration else ""
+        return (
+            f"{bold}Тестовый стенд продлён{bold}\n\n"
+            f"Сервис: {service}\n"
+            f"Адрес: {url}\n"
+            f"Новый срок: {expiration_date}{duration_text}\n"
+            f"Пользователь: {display_name}"
+        )
+    if action == "deleted":
+        return (
+            f"{bold}Тестовый стенд удалён{bold}\n\n"
+            f"Сервис: {service}\n"
+            f"Субдомен: {subdomain}\n"
+            f"Пользователь: {display_name}"
+        )
+    if action == "auto_deleted":
+        return (
+            f"{bold}Тестовый стенд автоматически удалён{bold}\n\n"
+            f"Сервис: {service}\n"
+            f"Субдомен: {subdomain}\n"
+            f"Создатель: {display_name}"
+        )
+    if action == "destroy_failed":
+        return (
+            f"{bold}Не удалось удалить тестовый стенд{bold}\n\n"
+            f"Сервис: {service}\n"
+            f"Субдомен: {subdomain}\n"
+            f"{run_line}"
+            f"Создатель: {display_name}"
+        )
+    return f"Неизвестное действие: {action} для стенда {service}/{subdomain}"
+
+
+async def send_stand_notification(
+    bot,
+    action,
+    service,
+    subdomain,
+    url,
+    expiration_date,
+    creator_id,
+    duration=None,
+    creator_username=None,
+    run_url=None,
+):
+    """Send notification to the channel about test stand events."""
+    if not NOTIFICATION_CHANNEL_ID:
+        logger.debug("Уведомление о стенде пропущено: NOTIFICATION_CHANNEL_ID не задан")
+        return
+
+    try:
+        text = build_stand_notification_text(
+            action,
+            service,
+            subdomain,
+            url,
+            expiration_date,
+            creator_id,
+            duration=duration,
+            creator_username=creator_username,
+            run_url=run_url,
+        )
+        logger.info("Отправка уведомления о стенде: %s — %s/%s", action, service, subdomain)
+        await bot.send_message(chat_id=NOTIFICATION_CHANNEL_ID, text=text)
+    except Exception as e:
+        logger.error(f"Ошибка отправки уведомления о стенде: {e}")

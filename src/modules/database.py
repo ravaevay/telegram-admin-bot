@@ -78,6 +78,27 @@ def init_db():
 
         _migrate_add_column(connection, "k8s_clusters", "platform", "TEXT DEFAULT 'telegram'")
 
+        connection.execute("""
+        CREATE TABLE IF NOT EXISTS stands (
+            id               INTEGER PRIMARY KEY AUTOINCREMENT,
+            service          TEXT NOT NULL,
+            subdomain        TEXT NOT NULL,
+            url              TEXT NOT NULL,
+            status           TEXT NOT NULL,
+            deploy_run_id    INTEGER,
+            deploy_run_url   TEXT,
+            destroy_run_id   INTEGER,
+            inputs_json      TEXT,
+            auto_destroy     INTEGER DEFAULT 0,
+            creator_id       TEXT NOT NULL,
+            creator_username TEXT,
+            expiration_date  TEXT NOT NULL,
+            created_at       TEXT NOT NULL,
+            platform         TEXT NOT NULL DEFAULT 'telegram'
+        )
+        """)
+        connection.commit()
+
     logger.info("База данных инициализирована.")
 
 
@@ -488,3 +509,195 @@ def extend_k8s_cluster_expiration(cluster_id, days):
     except Exception as e:
         logger.error(f"Ошибка при продлении K8s кластера {cluster_id}: {e}")
         return None
+
+
+# --- Stand CRUD (Gitea Actions test stands) ---
+
+
+def save_stand(
+    service,
+    subdomain,
+    url,
+    status,
+    deploy_run_id,
+    deploy_run_url,
+    inputs_json,
+    creator_id,
+    creator_username,
+    expiration_date,
+    created_at,
+    platform="telegram",
+):
+    """Сохранение информации о тестовом стенде. Возвращает id записи или None."""
+    try:
+        with sqlite3.connect(DB_PATH) as connection:
+            cursor = connection.execute(
+                """
+                INSERT INTO stands (
+                    service, subdomain, url, status, deploy_run_id, deploy_run_url,
+                    inputs_json, creator_id, creator_username,
+                    expiration_date, created_at, platform
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    service,
+                    subdomain,
+                    url,
+                    status,
+                    deploy_run_id,
+                    deploy_run_url,
+                    inputs_json,
+                    str(creator_id),
+                    creator_username,
+                    expiration_date,
+                    created_at,
+                    platform,
+                ),
+            )
+            connection.commit()
+            stand_id = cursor.lastrowid
+        logger.info(f"Стенд {service}/{subdomain} (ID: {stand_id}) сохранён в базе данных.")
+        return stand_id
+    except sqlite3.Error as e:
+        logger.error(f"Ошибка при сохранении стенда {service}/{subdomain}: {e}")
+        return None
+
+
+def get_stand_by_id(stand_id):
+    """Получить стенд по ID. Возвращает dict или None."""
+    try:
+        with sqlite3.connect(DB_PATH) as connection:
+            connection.row_factory = sqlite3.Row
+            cursor = connection.execute("SELECT * FROM stands WHERE id = ?", (stand_id,))
+            row = cursor.fetchone()
+            return dict(row) if row else None
+    except sqlite3.Error as e:
+        logger.error(f"Ошибка при получении стенда ID {stand_id}: {e}")
+        return None
+
+
+def get_stands_by_creator(creator_id):
+    """Получить все стенды, созданные пользователем. Возвращает list[dict]."""
+    try:
+        with sqlite3.connect(DB_PATH) as connection:
+            connection.row_factory = sqlite3.Row
+            cursor = connection.execute(
+                "SELECT * FROM stands WHERE creator_id = ? ORDER BY expiration_date",
+                (str(creator_id),),
+            )
+            return [dict(row) for row in cursor.fetchall()]
+    except sqlite3.Error as e:
+        logger.error(f"Ошибка при получении стендов пользователя {creator_id}: {e}")
+        return []
+
+
+def get_expiring_stands(platform=None):
+    """Получить стенды, срок действия которых истекает через 24 часа (кроме удаляемых). Возвращает list[dict]."""
+    try:
+        with sqlite3.connect(DB_PATH) as connection:
+            connection.row_factory = sqlite3.Row
+            query = (
+                "SELECT * FROM stands "
+                "WHERE status != 'destroying' "
+                "AND expiration_date <= datetime('now', 'localtime', '+1 day')"
+            )
+            params = ()
+            if platform:
+                query += " AND platform = ?"
+                params = (platform,)
+            cursor = connection.execute(query, params)
+            return [dict(row) for row in cursor.fetchall()]
+    except sqlite3.Error as e:
+        logger.error(f"Ошибка при получении стендов с истекающим сроком: {e}")
+        return []
+
+
+def get_deploying_stands(platform=None):
+    """Получить стенды в статусе 'deploying'. Возвращает list[dict]."""
+    return _get_stands_by_status("deploying", platform)
+
+
+def get_destroying_stands(platform=None):
+    """Получить стенды в статусе 'destroying'. Возвращает list[dict]."""
+    return _get_stands_by_status("destroying", platform)
+
+
+def _get_stands_by_status(status, platform=None):
+    try:
+        with sqlite3.connect(DB_PATH) as connection:
+            connection.row_factory = sqlite3.Row
+            query = "SELECT * FROM stands WHERE status = ?"
+            params = [status]
+            if platform:
+                query += " AND platform = ?"
+                params.append(platform)
+            cursor = connection.execute(query, params)
+            return [dict(row) for row in cursor.fetchall()]
+    except sqlite3.Error as e:
+        logger.error(f"Ошибка при получении стендов в статусе {status}: {e}")
+        return []
+
+
+def update_stand_status(stand_id, status, destroy_run_id=None, auto_destroy=None):
+    """Обновить статус стенда (и опционально destroy_run_id / auto_destroy)."""
+    try:
+        with sqlite3.connect(DB_PATH) as connection:
+            fields = ["status = ?"]
+            params = [status]
+            if destroy_run_id is not None:
+                fields.append("destroy_run_id = ?")
+                params.append(destroy_run_id)
+            if auto_destroy is not None:
+                fields.append("auto_destroy = ?")
+                params.append(1 if auto_destroy else 0)
+            params.append(stand_id)
+            connection.execute(f"UPDATE stands SET {', '.join(fields)} WHERE id = ?", params)
+            connection.commit()
+        logger.info(f"Статус стенда {stand_id} обновлён: {status}")
+        return True
+    except sqlite3.Error as e:
+        logger.error(f"Ошибка при обновлении статуса стенда {stand_id}: {e}")
+        return False
+
+
+def extend_stand_expiration(stand_id, days):
+    """Продлить срок действия стенда в базе данных."""
+    logger.info(f"Продление стенда ID {stand_id} на {days} дней")
+    try:
+        with sqlite3.connect(DB_PATH) as connection:
+            cursor = connection.execute("SELECT expiration_date FROM stands WHERE id = ?", (stand_id,))
+            row = cursor.fetchone()
+            if not row:
+                logger.error(f"Стенд ID {stand_id} не найден в БД.")
+                return None
+
+            current_expiration = datetime.strptime(row[0], "%Y-%m-%d %H:%M:%S")
+            new_expiration = current_expiration + timedelta(days=days)
+            new_expiration_str = new_expiration.strftime("%Y-%m-%d %H:%M:%S")
+
+            connection.execute(
+                "UPDATE stands SET expiration_date = ? WHERE id = ?",
+                (new_expiration_str, stand_id),
+            )
+            connection.commit()
+            logger.info(f"Стенд {stand_id} продлен до {new_expiration_str}")
+            return new_expiration_str
+    except Exception as e:
+        logger.error(f"Ошибка при продлении стенда {stand_id}: {e}")
+        return None
+
+
+def delete_stand(stand_id):
+    """Удаляет запись о стенде из базы данных."""
+    try:
+        with sqlite3.connect(DB_PATH) as connection:
+            cursor = connection.execute("DELETE FROM stands WHERE id = ?", (stand_id,))
+            connection.commit()
+            if cursor.rowcount > 0:
+                logger.info(f"Запись о стенде ID {stand_id} удалена из базы данных.")
+                return True
+            logger.warning(f"Запись о стенде ID {stand_id} не найдена в базе данных.")
+            return False
+    except sqlite3.Error as e:
+        logger.error(f"Ошибка при удалении стенда ID {stand_id} из базы данных: {e}")
+        return False

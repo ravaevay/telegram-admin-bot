@@ -170,52 +170,6 @@ async def get_latest_ubuntu_image(token):
     return ubuntu_images[0]["id"]
 
 
-STAND_READY_POLL_INTERVAL = 30  # seconds
-STAND_READY_POLL_ATTEMPTS = 40  # 40 × 30s = 20 minutes max
-
-
-async def check_stand_ready(ip_address):
-    """Check if a test stand is ready by polling HTTP on its IP.
-
-    Returns True if HTTP responds (any status), False on connection error.
-    """
-    try:
-        async with httpx.AsyncClient(timeout=10.0, verify=False) as client:
-            response = await client.get(f"http://{ip_address}/")
-            return response.status_code < 500
-    except (httpx.ConnectError, httpx.TimeoutException, httpx.RemoteProtocolError):
-        return False
-    except Exception:
-        return False
-
-
-async def wait_for_stand_ready(ip_address):
-    """Poll stand HTTP endpoint until it responds or timeout.
-
-    Returns True if stand became ready, False if timed out.
-    """
-    for attempt in range(STAND_READY_POLL_ATTEMPTS):
-        if await check_stand_ready(ip_address):
-            logger.info(f"Stand at {ip_address} is ready (attempt {attempt + 1})")
-            return True
-        await asyncio.sleep(STAND_READY_POLL_INTERVAL)
-    logger.warning(f"Stand at {ip_address} did not become ready after {STAND_READY_POLL_ATTEMPTS} attempts")
-    return False
-
-
-def build_stand_user_data(service, ds_tag="latest", service_tag="latest", domain_name=None):
-    """Build cloud-config user-data for test stand deployment (services4integration)."""
-    cmd = f"bash /app/{service}/install.sh -st {service_tag} -dt {ds_tag}"
-    if domain_name:
-        cmd += f" -dn {domain_name}"
-    return (
-        "#cloud-config\n"
-        "runcmd:\n"
-        f"  - git clone -b main https://github.com/ONLYOFFICE/services4integration.git --depth=1 /app\n"
-        f"  - {cmd}\n"
-    )
-
-
 async def create_droplet(
     token,
     name,
@@ -228,8 +182,6 @@ async def create_droplet(
     price_monthly=None,
     creator_tag=None,
     price_hourly=None,
-    user_data=None,
-    stand_type=None,
 ):
     """Создаёт Droplet в DigitalOcean."""
     try:
@@ -244,13 +196,9 @@ async def create_droplet(
             "ipv6": False,
             "monitoring": True,
         }
-        if user_data:
-            payload["user_data"] = user_data
         tags = ["createdby:telegram-admin-bot"]
         if creator_tag:
             tags.append(f"creator:{_sanitize_tag(creator_tag)}")
-        if stand_type:
-            tags.append("connectors")
         payload["tags"] = tags
 
         headers = {**_auth_headers(token), "Content-Type": "application/json"}
@@ -292,7 +240,6 @@ async def create_droplet(
             creator_username,
             created_at=created_at,
             price_hourly=price_hourly,
-            stand_type=stand_type,
         )
         logger.info(f"Инстанс {name} создан. ID: {droplet_id}, IP: {ip_address}, срок действия до {expiration_date}")
 

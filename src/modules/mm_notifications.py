@@ -25,7 +25,6 @@ async def send_notification(
     creator_username=None,
     domain_name=None,
     price_monthly=None,
-    stand_type=None,
 ):
     """Send notification to the MM channel about droplet events."""
     if not MM_NOTIFICATION_CHANNEL_ID:
@@ -39,13 +38,11 @@ async def send_notification(
         if action == "created":
             dns_line = f"DNS: {domain_name}\n" if domain_name else ""
             cost_line = f"Стоимость: ~${price_monthly}/мес\n" if price_monthly else ""
-            stand_line = f"Тестовый стенд: {stand_type}\n" if stand_type else ""
             text = (
                 f"**Новый инстанс создан**\n\n"
                 f"Имя: {droplet_name}\n"
                 f"IP: {ip_address}\n"
                 f"{dns_line}"
-                f"{stand_line}"
                 f"Тип: {type_label}\n"
                 f"{cost_line}"
                 f"Срок действия: {expiration_date}\n"
@@ -187,3 +184,44 @@ async def send_k8s_notification(
         )
     except Exception as e:
         logger.error(f"Ошибка отправки MM K8s уведомления: {e}")
+
+
+async def send_stand_notification(
+    driver,
+    action,
+    service,
+    subdomain,
+    url,
+    expiration_date,
+    creator_id,
+    duration=None,
+    creator_username=None,
+    run_url=None,
+):
+    """Send notification to the MM channel about test stand events."""
+    if not MM_NOTIFICATION_CHANNEL_ID:
+        logger.debug("MM уведомление о стенде пропущено: MM_NOTIFICATION_CHANNEL_ID не задан")
+        return
+
+    try:
+        from modules.notifications import build_stand_notification_text
+
+        text = build_stand_notification_text(
+            action,
+            service,
+            subdomain,
+            url,
+            expiration_date,
+            creator_id,
+            duration=duration,
+            creator_username=creator_username,
+            run_url=run_url,
+            bold="**",
+        )
+        logger.info("Отправка MM уведомления о стенде: %s — %s/%s", action, service, subdomain)
+        await asyncio.to_thread(
+            driver.posts.create_post,
+            {"channel_id": MM_NOTIFICATION_CHANNEL_ID, "message": text},
+        )
+    except Exception as e:
+        logger.error(f"Ошибка отправки MM уведомления о стенде: {e}")

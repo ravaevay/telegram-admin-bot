@@ -45,21 +45,9 @@ MM_AUTHORIZED_GROUPS = {
 
 MM_NOTIFICATION_CHANNEL_ID = os.getenv("MM_NOTIFICATION_CHANNEL_ID")
 
-# Test stands (services4integration)
-STAND_SERVICES = [
-    s.strip()
-    for s in os.getenv(
-        "STAND_SERVICES",
-        "nextcloud,wordpress,moodle,drupal,confluence,jira,humhub,"
-        "chamilo,redmine,owncloud,plone,strapi,alfresco,nuxeo,"
-        "liferay,odoo,suitecrm,seafile,documentserver",
-    ).split(",")
-    if s.strip()
-]
-
-STAND_DEFAULT_DS_TAG = os.getenv("STAND_DEFAULT_DS_TAG", "latest")
-
-STAND_DROPLET_TYPES = {
-    "s-2vcpu-4gb": "4GB-2vCPU-80GB",
-    "s-4vcpu-8gb": "8GB-4vCPU-160GB",
-}
+# Test stands (Gitea Actions in the stands-for-connectors repo)
+GITEA_URL = os.getenv("GITEA_URL", "https://git.onlyoffice.com")
+GITEA_TOKEN = os.getenv("GITEA_TOKEN")
+STANDS_REPO_OWNER = os.getenv("STANDS_REPO_OWNER", "ONLYOFFICE-DevOps")
+STANDS_REPO_NAME = os.getenv("STANDS_REPO_NAME", "stands-for-connectors")
+STAND_DOMAIN = os.getenv("STAND_DOMAIN", "onlyoffice.fun")
