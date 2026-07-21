@@ -16,8 +16,20 @@ STAND_DEPLOY_TIMEOUT_SECONDS = 5400  # 90 min: terraform + ansible can be slow
 CORRELATE_ATTEMPTS = 10
 CORRELATE_INTERVAL = 3  # seconds
 
-# Serialize dispatch+correlate so concurrent creations can't match each other's runs
-_dispatch_lock = asyncio.Lock()
+# Serialize dispatch+correlate so concurrent creations can't match each other's runs.
+# Created lazily per event loop: on Python 3.9 a module-level Lock binds to the
+# import-time loop and breaks when used from the bot's actual loop.
+_dispatch_lock = None
+_dispatch_lock_loop = None
+
+
+def _get_dispatch_lock():
+    global _dispatch_lock, _dispatch_lock_loop
+    loop = asyncio.get_event_loop()
+    if _dispatch_lock is None or _dispatch_lock_loop is not loop:
+        _dispatch_lock = asyncio.Lock()
+        _dispatch_lock_loop = loop
+    return _dispatch_lock
 
 # One entry per workflow_dispatch workflow in the stands repo.
 # "inputs" mirror the workflow inputs except the common "mode" and "subdomain",
@@ -246,7 +258,7 @@ async def dispatch_and_correlate(workflow_file, inputs, ref="main"):
     The dispatch endpoint returns no run id, so we remember the newest run id
     before dispatching and then poll for a newer workflow_dispatch run.
     """
-    async with _dispatch_lock:
+    async with _get_dispatch_lock():
         before = await list_runs(limit=1)
         if not before["success"]:
             return {"success": False, "run_id": None, "run_url": None, "message": before["message"]}
