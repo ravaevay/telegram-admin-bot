@@ -31,6 +31,7 @@ def _get_dispatch_lock():
         _dispatch_lock_loop = loop
     return _dispatch_lock
 
+
 # One entry per workflow_dispatch workflow in the stands repo.
 # "inputs" mirror the workflow inputs except the common "mode" and "subdomain",
 # which the bot always supplies itself.
