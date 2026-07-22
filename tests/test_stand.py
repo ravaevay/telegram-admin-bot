@@ -14,6 +14,7 @@ from modules.gitea_stands import (
     dispatch_and_correlate,
     get_run_status,
     list_runs,
+    _run_matches_workflow,
 )
 from modules.database import (
     init_db,
@@ -51,6 +52,21 @@ class TestStandCatalog:
     def test_build_stand_url(self):
         assert build_stand_url("wordpress", "wp-test") == f"https://{build_stand_fqdn('wp-test')}/"
         assert build_stand_url("finebi", "bi") == f"https://{build_stand_fqdn('bi')}/webroot/decision"
+
+
+class TestRunMatchesWorkflow:
+    def test_real_gitea_path_format(self):
+        # Gitea returns "deploy-wordpress.yml@refs/heads/main"
+        assert _run_matches_workflow({"path": "deploy-wordpress.yml@refs/heads/main"}, "deploy-wordpress.yml")
+        assert not _run_matches_workflow({"path": "deploy-moodle.yml@refs/heads/main"}, "deploy-wordpress.yml")
+
+    def test_path_with_directory_prefix(self):
+        assert _run_matches_workflow(
+            {"path": ".gitea/workflows/deploy-odoo.yml@refs/heads/main"}, "deploy-odoo.yml"
+        )
+
+    def test_no_identifying_field_accepts_any(self):
+        assert _run_matches_workflow({"id": 1}, "deploy-wordpress.yml")
 
 
 def _make_response(status_code=200, json_data=None):
@@ -137,10 +153,11 @@ class TestGiteaClient:
         assert result["run_id"] == 11  # oldest run newer than 10
 
     async def test_correlation_filters_by_workflow_path(self):
+        # Gitea returns path as "<workflow-file>@refs/heads/<branch>".
         before = [_run(10)]
         after = [
-            _run(12, path=".gitea/workflows/deploy-wordpress.yml"),
-            _run(11, path=".gitea/workflows/deploy-moodle.yml"),
+            _run(12, path="deploy-wordpress.yml@refs/heads/main"),
+            _run(11, path="deploy-moodle.yml@refs/heads/main"),
             _run(10),
         ]
         with (

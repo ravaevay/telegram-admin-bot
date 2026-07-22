@@ -246,7 +246,11 @@ def _run_matches_workflow(run, workflow_file):
     """Match a run object to a workflow file across Gitea versions (path/workflow_id/name fields)."""
     path = run.get("path") or ""
     if path:
-        return path.endswith(workflow_file)
+        # Gitea returns the workflow path as "deploy-wordpress.yml@refs/heads/main"
+        # (optionally with a directory prefix). Strip the "@<ref>" suffix and any
+        # leading directories before comparing to the bare workflow file name.
+        workflow_name = path.split("@", 1)[0].rsplit("/", 1)[-1]
+        return workflow_name == workflow_file
     workflow_id = str(run.get("workflow_id") or "")
     if workflow_id:
         return workflow_id == workflow_file
@@ -311,16 +315,14 @@ async def get_run_status(run_id):
                     headers=_auth_headers(),
                 )
                 run = response.json()
-            except httpx.HTTPStatusError as e:
-                if e.response is not None and e.response.status_code == 404:
-                    result = await list_runs(limit=100)
-                    if not result["success"]:
-                        return {"success": False, "status": None, "conclusion": None, "run_url": None}
-                    run = next((r for r in result["runs"] if r.get("id") == run_id), None)
-                    if run is None:
-                        return {"success": False, "status": None, "conclusion": None, "run_url": None}
-                else:
-                    raise
+            except httpx.HTTPStatusError:
+                # Some Gitea versions have no single-run endpoint — fall back to the list.
+                result = await list_runs(limit=100)
+                if not result["success"]:
+                    return {"success": False, "status": None, "conclusion": None, "run_url": None}
+                run = next((r for r in result["runs"] if r.get("id") == run_id), None)
+                if run is None:
+                    return {"success": False, "status": None, "conclusion": None, "run_url": None}
             return {
                 "success": True,
                 "status": run.get("status"),
