@@ -26,6 +26,7 @@ from modules.database import (
     update_stand_status,
     extend_stand_expiration,
     delete_stand,
+    get_active_stand_by_subdomain,
 )
 
 
@@ -313,3 +314,28 @@ class TestStandDatabase:
         assert delete_stand(stand_id)
         assert get_stand_by_id(stand_id) is None
         assert not delete_stand(stand_id)  # already gone
+
+
+class TestActiveStandBySubdomain:
+    def test_finds_existing(self, tmp_db):
+        init_db()
+        _save_test_stand(subdomain="dup", status="active")
+        found = get_active_stand_by_subdomain("dup")
+        assert found is not None
+        assert found["subdomain"] == "dup"
+
+    def test_none_when_missing(self, tmp_db):
+        init_db()
+        assert get_active_stand_by_subdomain("nope") is None
+
+    def test_matches_across_platforms(self, tmp_db):
+        init_db()
+        _save_test_stand(subdomain="shared", platform="mattermost", status="deploying")
+        assert get_active_stand_by_subdomain("shared") is not None
+
+    def test_returns_latest_on_duplicates(self, tmp_db):
+        init_db()
+        _save_test_stand(subdomain="dup", status="deploy_failed", created_at="2024-01-01 00:00:00")
+        _save_test_stand(subdomain="dup", service="moodle", status="active", created_at="2024-06-01 00:00:00")
+        found = get_active_stand_by_subdomain("dup")
+        assert found["service"] == "moodle"

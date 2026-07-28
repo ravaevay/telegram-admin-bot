@@ -22,6 +22,9 @@ AUTHORIZED_GROUPS = {
     "stand": [int(x) for x in os.getenv("AUTHORIZED_STAND_USERS", "").split(",") if x.strip()],
 }
 
+# Global admins (Telegram user IDs) — can manage module permissions via the bot
+GLOBAL_ADMIN_USERS = [int(x) for x in os.getenv("GLOBAL_ADMIN_USERS", "").split(",") if x.strip()]
+
 DB_PATH = os.getenv("DB_PATH", "./instances.db")
 
 NOTIFICATION_CHANNEL_ID = os.getenv("NOTIFICATION_CHANNEL_ID")

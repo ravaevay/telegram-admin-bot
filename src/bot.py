@@ -22,6 +22,7 @@ from config import (
     SSH_CONFIG,
     DIGITALOCEAN_TOKEN,
     GITEA_TOKEN,
+    AUTHORIZED_GROUPS,
 )
 from modules.create_test_instance import (
     create_droplet,
@@ -53,7 +54,7 @@ from modules.create_k8s_cluster import (
     get_k8s_sizes,
     get_kubeconfig,
 )
-from modules.authorization import is_authorized, is_authorized_for_bot
+from modules.authorization import is_authorized, is_authorized_for_bot, is_global_admin
 from modules.database import (
     init_db,
     get_expiring_instances,
@@ -78,6 +79,10 @@ from modules.database import (
     update_stand_status,
     extend_stand_expiration,
     delete_stand,
+    get_active_stand_by_subdomain,
+    grant_permission,
+    revoke_permission,
+    get_user_permissions,
 )
 from modules.mail import create_mailbox, generate_password, reset_password
 from modules.notifications import send_notification, send_k8s_notification, send_stand_notification
@@ -104,8 +109,11 @@ SELECT_SSH_KEY, SELECT_IMAGE, SELECT_DNS_ZONE, INPUT_SUBDOMAIN, SELECT_TYPE, SEL
 MANAGE_LIST, MANAGE_ACTION, MANAGE_EXTEND, MANAGE_CONFIRM_DELETE = range(100, 104)
 K8S_SELECT_VERSION, K8S_SELECT_NODE_SIZE, K8S_SELECT_NODE_COUNT, K8S_SELECT_DURATION, K8S_INPUT_NAME = range(200, 205)
 K8S_MANAGE_LIST, K8S_MANAGE_ACTION, K8S_MANAGE_EXTEND, K8S_MANAGE_CONFIRM_DELETE = range(205, 209)
-STAND_SELECT_SERVICE, STAND_INPUT_SUBDOMAIN, STAND_INPUT_PARAM, STAND_SELECT_DURATION = range(300, 304)
+STAND_SELECT_SERVICE, STAND_INPUT_SUBDOMAIN, STAND_INPUT_PARAM, STAND_SELECT_DURATION, STAND_CONFIRM_DUP = range(
+    300, 305
+)
 STAND_MANAGE_ACTION, STAND_MANAGE_EXTEND, STAND_MANAGE_CONFIRM_DELETE = range(310, 313)
+ADMIN_INPUT_USER, ADMIN_TOGGLE = range(400, 402)
 
 STAND_STATUS_LABELS = {
     "deploying": "деплоится",
@@ -113,6 +121,14 @@ STAND_STATUS_LABELS = {
     "deploy_failed": "ошибка деплоя",
     "destroying": "удаляется",
     "destroy_failed": "ошибка удаления",
+}
+
+# Module labels for the admin permissions UI
+MODULE_LABELS = {
+    "mail": "Почта",
+    "droplet": "Инстансы",
+    "k8s": "K8s",
+    "stand": "Стенды",
 }
 
 # Track users who initiated /start in group chats
@@ -147,6 +163,8 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         [InlineKeyboardButton("🔧 Создать тестовый стенд", callback_data="create_stand")],
         [InlineKeyboardButton("🔧 Мои стенды", callback_data="manage_stands")],
     ]
+    if is_global_admin(user_id):
+        keyboard.append([InlineKeyboardButton("⚙️ Управление правами", callback_data="admin_perms")])
     reply_markup = InlineKeyboardMarkup(keyboard)
     await update.message.reply_text("Добро пожаловать! Выберите действие:", reply_markup=reply_markup)
 
@@ -1312,12 +1330,58 @@ async def stand_input_subdomain(update: Update, context: ContextTypes.DEFAULT_TY
         return STAND_INPUT_SUBDOMAIN
 
     context.user_data["stand_subdomain"] = subdomain
+
+    existing = get_active_stand_by_subdomain(subdomain)
+    if existing:
+        status_label = STAND_STATUS_LABELS.get(existing["status"], existing["status"])
+        keyboard = [
+            [InlineKeyboardButton("Продолжить", callback_data="stand_dup_continue")],
+            [InlineKeyboardButton("Отмена", callback_data="stand_dup_cancel")],
+        ]
+        await update.message.reply_text(
+            f"⚠️ Стенд с субдоменом *{subdomain}* уже существует:\n"
+            f"• Сервис: {existing['service']}\n"
+            f"• URL: {existing['url']}\n"
+            f"• Статус: {status_label}\n"
+            f"• Создатель: {existing.get('creator_username') or existing['creator_id']}\n"
+            f"• Истекает: {existing['expiration_date']}\n\n"
+            f"Создание нового стенда может перезаписать существующий. Продолжить?",
+            parse_mode="Markdown",
+            reply_markup=InlineKeyboardMarkup(keyboard),
+        )
+        return STAND_CONFIRM_DUP
+
+    return await _stand_proceed_to_params(update.message, context)
+
+
+async def _stand_proceed_to_params(message, context) -> int:
+    """Инициализировать очередь параметров workflow и запросить первый параметр."""
     service = context.user_data["stand_service"]
     context.user_data["stand_param_queue"] = STAND_CATALOG[service]["inputs"]
     context.user_data["stand_param_index"] = 0
     context.user_data["stand_inputs"] = {}
+    return await _stand_ask_next_param(message, context)
 
-    return await _stand_ask_next_param(update.message, context)
+
+async def stand_dup_continue(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Пользователь подтвердил создание стенда с существующим субдоменом."""
+    query = update.callback_query
+    try:
+        await query.answer()
+    except BadRequest:
+        pass
+    return await _stand_proceed_to_params(query.message, context)
+
+
+async def stand_dup_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Пользователь отменил создание стенда с существующим субдоменом."""
+    query = update.callback_query
+    try:
+        await query.answer()
+    except BadRequest:
+        pass
+    await query.message.reply_text("Создание стенда отменено.")
+    return ConversationHandler.END
 
 
 async def _stand_ask_next_param(message, context) -> int:
@@ -2342,6 +2406,119 @@ def _check_group_access(update: Update, user_id: int) -> bool:
     return True
 
 
+# --- Admin permissions management (global admins only) ---
+
+
+def _admin_perms_keyboard(target_id):
+    """Клавиатура управления правами пользователя.
+
+    env-права помечаются 🔒 (не отзываются через бота), права из БД переключаются.
+    """
+    db_modules = get_user_permissions(target_id, platform="telegram")
+    keyboard = []
+    for module, label in MODULE_LABELS.items():
+        if target_id in AUTHORIZED_GROUPS.get(module, []):
+            text = f"🔒 {label} (env)"
+            callback = "admin_noop"
+        elif module in db_modules:
+            text = f"✅ {label}"
+            callback = f"admin_toggle_{module}"
+        else:
+            text = f"⬜ {label}"
+            callback = f"admin_toggle_{module}"
+        keyboard.append([InlineKeyboardButton(text, callback_data=callback)])
+    keyboard.append([InlineKeyboardButton("Готово", callback_data="admin_done")])
+    return InlineKeyboardMarkup(keyboard)
+
+
+async def admin_entry(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Вход в меню управления правами (только для глобальных админов)."""
+    query = update.callback_query
+    user_id = query.from_user.id
+
+    if not _check_group_access(update, user_id):
+        await query.answer("У вас нет доступа к этой кнопке.", show_alert=True)
+        return ConversationHandler.END
+
+    await query.answer()
+
+    if not is_global_admin(user_id):
+        await query.message.reply_text("Эта функция доступна только глобальным администраторам.")
+        return ConversationHandler.END
+
+    await query.message.reply_text("Введите числовой Telegram ID пользователя:")
+    return ADMIN_INPUT_USER
+
+
+async def admin_input_user(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Получение ID целевого пользователя и показ клавиатуры прав."""
+    text = update.message.text.strip()
+    try:
+        target_id = int(text)
+    except ValueError:
+        await update.message.reply_text("Некорректный ID. Введите числовой Telegram ID:")
+        return ADMIN_INPUT_USER
+
+    context.user_data["admin_target"] = target_id
+    await update.message.reply_text(
+        f"Управление правами пользователя `{target_id}`.\n"
+        f"Нажмите на модуль, чтобы выдать (⬜→✅) или снять (✅→⬜) право.\n"
+        f"🔒 — право задано через env и не изменяется через бота.",
+        parse_mode="Markdown",
+        reply_markup=_admin_perms_keyboard(target_id),
+    )
+    return ADMIN_TOGGLE
+
+
+async def admin_toggle_module(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Переключение права на модуль для целевого пользователя."""
+    query = update.callback_query
+    try:
+        await query.answer()
+    except BadRequest:
+        pass
+
+    module = query.data.removeprefix("admin_toggle_")
+    target_id = context.user_data.get("admin_target")
+    if target_id is None or module not in MODULE_LABELS:
+        await query.message.reply_text("Сессия устарела. Откройте меню заново через /start.")
+        return ConversationHandler.END
+
+    # env-права неизменяемы через бота
+    if target_id in AUTHORIZED_GROUPS.get(module, []):
+        return ADMIN_TOGGLE
+
+    if module in get_user_permissions(target_id, platform="telegram"):
+        revoke_permission(target_id, module, platform="telegram")
+    else:
+        grant_permission(target_id, module, granted_by=query.from_user.id, platform="telegram")
+
+    await query.edit_message_reply_markup(reply_markup=_admin_perms_keyboard(target_id))
+    return ADMIN_TOGGLE
+
+
+async def admin_noop(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Заглушка для неизменяемых (env) прав."""
+    query = update.callback_query
+    try:
+        await query.answer("Это право задано через env и не изменяется через бота.", show_alert=True)
+    except BadRequest:
+        pass
+    return ADMIN_TOGGLE
+
+
+async def admin_done(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Завершение управления правами."""
+    query = update.callback_query
+    try:
+        await query.answer()
+    except BadRequest:
+        pass
+    target_id = context.user_data.pop("admin_target", None)
+    await query.message.reply_text(f"Готово. Права пользователя {target_id} обновлены.")
+    return ConversationHandler.END
+
+
 # --- Main ---
 
 
@@ -2472,6 +2649,10 @@ def main():
             STAND_INPUT_SUBDOMAIN: [
                 MessageHandler(filters.TEXT & ~filters.COMMAND, stand_input_subdomain),
             ],
+            STAND_CONFIRM_DUP: [
+                CallbackQueryHandler(stand_dup_continue, pattern=r"^stand_dup_continue$"),
+                CallbackQueryHandler(stand_dup_cancel, pattern=r"^stand_dup_cancel$"),
+            ],
             STAND_INPUT_PARAM: [
                 CallbackQueryHandler(stand_param_default, pattern=r"^stand_par_def$"),
                 CallbackQueryHandler(stand_param_option, pattern=r"^stand_par_opt_"),
@@ -2511,8 +2692,29 @@ def main():
         per_chat=True,
     )
 
+    # Conversation: admin permissions management (global admins only)
+    admin_conv = ConversationHandler(
+        entry_points=[CallbackQueryHandler(admin_entry, pattern=r"^admin_perms$")],
+        states={
+            ADMIN_INPUT_USER: [
+                MessageHandler(filters.TEXT & ~filters.COMMAND, admin_input_user),
+            ],
+            ADMIN_TOGGLE: [
+                CallbackQueryHandler(admin_toggle_module, pattern=r"^admin_toggle_"),
+                CallbackQueryHandler(admin_noop, pattern=r"^admin_noop$"),
+                CallbackQueryHandler(admin_done, pattern=r"^admin_done$"),
+            ],
+        },
+        fallbacks=[CommandHandler("cancel", cancel)],
+        allow_reentry=True,
+        conversation_timeout=CONVERSATION_TIMEOUT,
+        per_user=True,
+        per_chat=True,
+    )
+
     # Register handlers (order matters — conversations first, then standalone callbacks)
     app.add_handler(CommandHandler("start", start))
+    app.add_handler(admin_conv)
     app.add_handler(mail_conv)
     app.add_handler(reset_conv)
     app.add_handler(droplet_conv)
