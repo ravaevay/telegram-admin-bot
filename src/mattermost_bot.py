@@ -80,6 +80,7 @@ from modules.database import (
     update_stand_status,
     extend_stand_expiration,
     delete_stand,
+    get_active_stand_by_subdomain,
 )
 from modules.mail import create_mailbox, generate_password, reset_password
 from modules.mm_conversation import ConversationManager
@@ -139,6 +140,7 @@ ST_K8S_MANAGE_CONFIRM_DELETE = "k8s_manage_confirm_delete"
 FLOW_STAND_CREATE = "stand_create"
 ST_STAND_SELECT_SERVICE = "stand_select_service"
 ST_STAND_INPUT_SUBDOMAIN = "stand_input_subdomain"
+ST_STAND_CONFIRM_DUP = "stand_confirm_dup"
 ST_STAND_INPUT_PARAM = "stand_input_param"
 ST_STAND_SELECT_DURATION = "stand_select_duration"
 
@@ -502,6 +504,11 @@ async def dispatch_action(user_id, channel_id, action, context, data):
     # --- Stand creation ---
     elif action.startswith("stand_svc_"):
         await handle_stand_service_select(user_id, channel_id, action)
+    elif action == "stand_dup_continue":
+        await handle_stand_dup_continue(user_id, channel_id)
+    elif action == "stand_dup_cancel":
+        conversations.end(user_id)
+        await post_message(channel_id, "Создание стенда отменено.")
     elif action == "stand_par_def":
         await handle_stand_param_default(user_id, channel_id)
     elif action.startswith("stand_par_opt_"):
@@ -1490,11 +1497,46 @@ async def handle_stand_subdomain_input(user_id, channel_id, text):
         return
 
     conv.data["stand_subdomain"] = subdomain
+
+    existing = get_active_stand_by_subdomain(subdomain)
+    if existing:
+        status_label = STAND_STATUS_LABELS.get(existing["status"], existing["status"])
+        buttons = [
+            {"id": "sdupcont", "name": "Продолжить", "context": {"action": "stand_dup_continue"}},
+            {"id": "sdupcanc", "name": "Отмена", "context": {"action": "stand_dup_cancel"}},
+        ]
+        conv.state = ST_STAND_CONFIRM_DUP
+        conv.touch()
+        await post_with_buttons(
+            channel_id,
+            f"⚠️ Стенд с субдоменом **{subdomain}** уже существует:\n"
+            f"• Сервис: {existing['service']}\n"
+            f"• URL: {existing['url']}\n"
+            f"• Статус: {status_label}\n"
+            f"• Создатель: {existing.get('creator_username') or existing['creator_id']}\n"
+            f"• Истекает: {existing['expiration_date']}\n\n"
+            f"Создание нового стенда может перезаписать существующий. Продолжить?",
+            buttons,
+        )
+        return
+
     conv.data["stand_param_index"] = 0
     conv.data["stand_inputs"] = {}
     conv.state = ST_STAND_INPUT_PARAM
     conv.touch()
 
+    await _stand_ask_next_param_mm(user_id, channel_id)
+
+
+async def handle_stand_dup_continue(user_id, channel_id):
+    """Пользователь подтвердил создание стенда с существующим субдоменом."""
+    conv = conversations.get(user_id)
+    if not conv or conv.flow_name != FLOW_STAND_CREATE:
+        return
+    conv.data["stand_param_index"] = 0
+    conv.data["stand_inputs"] = {}
+    conv.state = ST_STAND_INPUT_PARAM
+    conv.touch()
     await _stand_ask_next_param_mm(user_id, channel_id)
 
 

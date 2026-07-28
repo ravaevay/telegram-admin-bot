@@ -99,6 +99,18 @@ def init_db():
         """)
         connection.commit()
 
+        connection.execute("""
+        CREATE TABLE IF NOT EXISTS user_permissions (
+            user_id     TEXT NOT NULL,
+            module      TEXT NOT NULL,
+            platform    TEXT NOT NULL DEFAULT 'telegram',
+            granted_by  TEXT,
+            granted_at  TEXT NOT NULL,
+            PRIMARY KEY (user_id, module, platform)
+        )
+        """)
+        connection.commit()
+
     logger.info("База данных инициализирована.")
 
 
@@ -701,3 +713,99 @@ def delete_stand(stand_id):
     except sqlite3.Error as e:
         logger.error(f"Ошибка при удалении стенда ID {stand_id} из базы данных: {e}")
         return False
+
+
+def get_active_stand_by_subdomain(subdomain):
+    """Найти существующий стенд с таким же subdomain (кроме уже удалённых). Возвращает dict или None."""
+    try:
+        with sqlite3.connect(DB_PATH) as connection:
+            connection.row_factory = sqlite3.Row
+            cursor = connection.execute(
+                """
+                SELECT * FROM stands
+                WHERE subdomain = ?
+                AND status IN ('deploying', 'active', 'destroying', 'deploy_failed', 'destroy_failed')
+                ORDER BY created_at DESC
+                LIMIT 1
+                """,
+                (subdomain,),
+            )
+            row = cursor.fetchone()
+            return dict(row) if row else None
+    except sqlite3.Error as e:
+        logger.error(f"Ошибка при поиске стенда по subdomain {subdomain}: {e}")
+        return None
+
+
+# --- User permissions (runtime module grants, managed by global admins) ---
+
+
+def grant_permission(user_id, module, granted_by, platform="telegram"):
+    """Выдать пользователю право на модуль (UPSERT). Возвращает True/False."""
+    now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    try:
+        with sqlite3.connect(DB_PATH) as connection:
+            connection.execute(
+                """
+                INSERT INTO user_permissions (user_id, module, platform, granted_by, granted_at)
+                VALUES (?, ?, ?, ?, ?)
+                ON CONFLICT(user_id, module, platform) DO UPDATE SET
+                    granted_by = excluded.granted_by,
+                    granted_at = excluded.granted_at
+                """,
+                (str(user_id), module, platform, str(granted_by), now),
+            )
+            connection.commit()
+        logger.info(f"Право '{module}' выдано пользователю {user_id} ({platform}) админом {granted_by}.")
+        return True
+    except sqlite3.Error as e:
+        logger.error(f"Ошибка при выдаче права '{module}' пользователю {user_id}: {e}")
+        return False
+
+
+def revoke_permission(user_id, module, platform="telegram"):
+    """Снять у пользователя право на модуль. Возвращает True/False."""
+    try:
+        with sqlite3.connect(DB_PATH) as connection:
+            cursor = connection.execute(
+                "DELETE FROM user_permissions WHERE user_id = ? AND module = ? AND platform = ?",
+                (str(user_id), module, platform),
+            )
+            connection.commit()
+            if cursor.rowcount > 0:
+                logger.info(f"Право '{module}' снято у пользователя {user_id} ({platform}).")
+                return True
+            return False
+    except sqlite3.Error as e:
+        logger.error(f"Ошибка при снятии права '{module}' у пользователя {user_id}: {e}")
+        return False
+
+
+def get_user_permissions(user_id, platform="telegram"):
+    """Получить список модулей, выданных пользователю через БД. Возвращает list[str]."""
+    try:
+        with sqlite3.connect(DB_PATH) as connection:
+            cursor = connection.execute(
+                "SELECT module FROM user_permissions WHERE user_id = ? AND platform = ?",
+                (str(user_id), platform),
+            )
+            return [row[0] for row in cursor.fetchall()]
+    except sqlite3.Error as e:
+        logger.error(f"Ошибка при получении прав пользователя {user_id}: {e}")
+        return []
+
+
+def get_permission_users(platform="telegram"):
+    """Получить всех пользователей с выданными правами. Возвращает dict[user_id -> list[module]]."""
+    result = {}
+    try:
+        with sqlite3.connect(DB_PATH) as connection:
+            cursor = connection.execute(
+                "SELECT user_id, module FROM user_permissions WHERE platform = ? ORDER BY user_id",
+                (platform,),
+            )
+            for user_id, module in cursor.fetchall():
+                result.setdefault(user_id, []).append(module)
+    except sqlite3.Error as e:
+        logger.error(f"Ошибка при получении списка пользователей с правами: {e}")
+    return result
