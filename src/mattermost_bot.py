@@ -40,6 +40,8 @@ from modules.create_test_instance import (
 )
 from modules.gitea_stands import (
     STAND_CATALOG,
+    format_param_default,
+    format_param_value,
     STAND_POLL_INTERVAL_SECONDS,
     STAND_DEPLOY_TIMEOUT_SECONDS,
     build_stand_fqdn,
@@ -1516,11 +1518,19 @@ async def _stand_ask_next_param_mm(user_id, channel_id):
     if param["type"] == "choice":
         buttons = []
         for i, option in enumerate(param["options"]):
-            label = f"{option} (по умолчанию)" if option == param["default"] else option
+            label = format_param_value(param, option)
+            if option == param["default"]:
+                label = f"{label} (по умолчанию)"
             buttons.append({"id": f"spopt{i}", "name": label, "context": {"action": f"stand_par_opt_{i}"}})
         await post_with_buttons(channel_id, f"{param['label']}:", buttons)
     else:
-        buttons = [{"id": "spdef", "name": f"По умолчанию: {param['default']}", "context": {"action": "stand_par_def"}}]
+        buttons = [
+            {
+                "id": "spdef",
+                "name": f"По умолчанию: {format_param_default(param)}",
+                "context": {"action": "stand_par_def"},
+            }
+        ]
         await post_with_buttons(
             channel_id,
             f"{param['label']} — введите значение или используйте вариант по умолчанию:",

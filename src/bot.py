@@ -37,6 +37,8 @@ from modules.create_test_instance import (
 )
 from modules.gitea_stands import (
     STAND_CATALOG,
+    format_param_default,
+    format_param_value,
     STAND_POLL_INTERVAL_SECONDS,
     STAND_DEPLOY_TIMEOUT_SECONDS,
     build_stand_fqdn,
@@ -1332,11 +1334,15 @@ async def _stand_ask_next_param(message, context) -> int:
     if param["type"] == "choice":
         keyboard = []
         for i, option in enumerate(param["options"]):
-            label = f"{option} (по умолчанию)" if option == param["default"] else option
+            label = format_param_value(param, option)
+            if option == param["default"]:
+                label = f"{label} (по умолчанию)"
             keyboard.append([InlineKeyboardButton(label, callback_data=f"stand_par_opt_{i}")])
         await message.reply_text(f"{param['label']}:", reply_markup=InlineKeyboardMarkup(keyboard))
     else:
-        keyboard = [[InlineKeyboardButton(f"По умолчанию: {param['default']}", callback_data="stand_par_def")]]
+        keyboard = [
+            [InlineKeyboardButton(f"По умолчанию: {format_param_default(param)}", callback_data="stand_par_def")]
+        ]
         await message.reply_text(
             f"{param['label']} — введите значение или используйте вариант по умолчанию:",
             reply_markup=InlineKeyboardMarkup(keyboard),

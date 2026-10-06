@@ -21,9 +21,6 @@ python src/mattermost_bot.py
 # Run with Docker
 docker-compose up --build -d
 
-# View database entries (utility script)
-python show_entries.py
-
 # Legacy migration (adds droplet_type column) — no longer needed,
 # init_db() handles all migrations automatically via _migrate_add_column()
 python src/fix_db.py
@@ -32,7 +29,7 @@ python src/fix_db.py
 ## Lint & Test
 
 ```bash
-# Lint (Ruff — config in pyproject.toml)
+# Lint (Ruff — config in pyproject.toml; CI lints src/ only, not tests/)
 ruff check src/
 ruff format --check src/
 
@@ -42,7 +39,18 @@ gh run view <run_id>               # run details
 gh run view <run_id> --log         # full log output
 ```
 
-CI/CD: `.github/workflows/ci.yml` — lint + test on push/PR to main; Docker build+push on push to main and `v*.*` / `v*.*.*` tags. Always verify test results via GitHub Actions after pushing, not by running tests locally.
+Test runner invocation used by CI (`pytest` and `pytest-asyncio` are **not** in `requirements.txt` — CI installs them separately):
+
+```bash
+pip install -r requirements.txt pytest pytest-asyncio
+pytest tests/ -v                                   # full suite
+pytest tests/test_stand.py -v                      # single file
+pytest tests/test_stand.py::TestStandCatalog -v    # single class (tests are class-grouped)
+pytest tests/test_stand.py::TestStandCatalog::test_build_stand_url -v   # single test
+pytest tests/ -k "stand and not notification" -v   # by keyword
+```
+
+CI/CD: `.github/workflows/ci.yml` — lint + test on push/PR to main; Docker build+push on push to main and `v*.*` / `v*.*.*` tags. Always verify test results via GitHub Actions after pushing, not by running tests locally. Note the tension with the git workflow below: CI lives in `.github/workflows/` and `gh run list` queries the GitHub `origin` remote, while pushes go to `gitea`.
 
 **Testing gotcha:** `config.py` calls `int(os.getenv(...))` at import time. Tests must set env vars (e.g. `AUTHORIZED_MAIL_USERS=1`, `AUTHORIZED_DROPLET_USERS=1`, `AUTHORIZED_K8S_USERS=1`, `AUTHORIZED_STAND_USERS=1`) *before* any `src/` import. `MM_*` env vars also need defaults in `conftest.py` (already handled). This is managed in `tests/conftest.py`.
 
@@ -60,6 +68,8 @@ CI/CD: `.github/workflows/ci.yml` — lint + test on push/PR to main; Docker bui
 - Standalone `CallbackQueryHandler`s for `extend_*`, `delete_*`, `k8s_extend_*`, `k8s_delete_*`, `stand_extend_*`, and `stand_delete_*` actions (used by background-job notification buttons)
 
 **Droplet creation conversation states:** `SELECT_SSH_KEY → SELECT_IMAGE → SELECT_DNS_ZONE → INPUT_SUBDOMAIN → SELECT_TYPE → SELECT_DURATION → INPUT_NAME`. DNS steps are skippable (user can choose "Пропустить" or auto-skipped if no domains exist). When DNS is configured, the FQDN is used as the droplet name and the `INPUT_NAME` step is skipped. At `SELECT_SSH_KEY`, keys are reordered by the user's usage history (most frequently used first) and the top-3 preferred keys are auto-selected; new users get the default first-3 selection.
+
+**Droplet management conversation states (100–103):** `MANAGE_LIST → MANAGE_ACTION → MANAGE_EXTEND / MANAGE_CONFIRM_DELETE`.
 
 **K8s creation conversation states (200–204):** `K8S_SELECT_VERSION → K8S_SELECT_NODE_SIZE → K8S_SELECT_NODE_COUNT → K8S_SELECT_DURATION → K8S_INPUT_NAME`. Creates cluster immediately (status `provisioning`); background job polls for `running` state. K8s management states (205–208): `K8S_MANAGE_LIST → K8S_MANAGE_ACTION → K8S_MANAGE_EXTEND / K8S_MANAGE_CONFIRM_DELETE`.
 
@@ -82,7 +92,7 @@ CI/CD: `.github/workflows/ci.yml` — lint + test on push/PR to main; Docker bui
 - `modules/database.py` — SQLite CRUD for four tables: `instances` (droplets), `ssh_key_usage` (per-user SSH key preferences), `k8s_clusters` (cluster_id TEXT PK, cluster_name, region, version, node_size, node_count, status, endpoint, creator_id, creator_username, expiration_date, created_at, price_hourly, ha), and `stands` (id INTEGER PK AUTOINCREMENT, service, subdomain, url, status, deploy_run_id/deploy_run_url, destroy_run_id, inputs_json, auto_destroy, creator_id TEXT — Telegram int or MM string, always compare via `str()`, creator_username, expiration_date, created_at, platform). Schema migrations via `_migrate_add_column()` (the legacy `instances.stand_type` migration line is kept for old DBs). All resource tables have a `platform` column (`TEXT DEFAULT 'telegram'`) to distinguish records created by each bot. WAL mode is enabled for safe concurrent access from both bots. `get_expiring_*` and status-filter functions accept an optional `platform` filter. Stand functions: `save_stand()` (returns lastrowid), `get_stand_by_id()`, `get_stands_by_creator()`, `get_expiring_stands()` (excludes `destroying`), `get_deploying_stands()`, `get_destroying_stands()`, `update_stand_status()` (optionally sets destroy_run_id/auto_destroy), `extend_stand_expiration()`, `delete_stand()`.
 - `modules/mail.py` — Paramiko SSH to mail server, runs Python scripts inside `onlyoffice-mail-server` Docker container for mailbox creation/password reset
 - `modules/create_test_instance.py` — DigitalOcean REST API calls (create/delete droplets, list SSH keys/images, DNS record management, size/pricing with 1h TTL cache, snapshot creation with action polling, creator tagging via `_sanitize_tag()`). Droplets created in `fra1` region.
-- `modules/gitea_stands.py` — Gitea Actions layer for test stands. `STAND_CATALOG`: static dict of 12 services → `{workflow_file, url_path, inputs: [{name, label (RU), type: string|choice, default, options?}]}` mirroring each workflow's `workflow_dispatch` inputs (minus the common `mode`/`subdomain` supplied by the bot). `dispatch_workflow()` POSTs `/repos/{owner}/{repo}/actions/workflows/{file}/dispatches` (returns 204, no run id). `dispatch_and_correlate()` (serialized via a lazily-created per-event-loop asyncio lock — a module-level Lock breaks on Python 3.9) remembers the newest run id before dispatch, then polls for a newer `workflow_dispatch` run (matching `path` if the API returns it); if correlation fails it still returns success with `run_id=None` and the poll job falls back to a 90-min timeout. `get_run_status()` GETs `/actions/runs/{id}` with a list-based fallback for older Gitea. `list_runs()` handles both `{"workflow_runs": [...]}` and bare-list responses. `deploy_stand()`/`destroy_stand()` wrap dispatch with `mode=deploy|destroy`. Retry helper `_gitea_request_with_retry()` copied from the K8s module (429 → Retry-After, 5xx → exp backoff, timeout → retry, 4xx → raise).
+- `modules/gitea_stands.py` — Gitea Actions layer for test stands. `STAND_CATALOG`: static dict of 16 services → `{workflow_file, url_path, inputs: [{name, label (RU), type: string|choice, default, options?, option_labels?}]}` mirroring each workflow's `workflow_dispatch` inputs (minus the common `mode`/`subdomain` supplied by the bot). Values may legitimately be the empty string (DocSpace `image_status=""` = public images, `docspace_version=""` = newest tag); both bots render every button label through `format_param_value()`/`format_param_default()`, which substitute the optional per-option `option_labels` or fall back to `EMPTY_VALUE_LABEL` — Telegram rejects buttons with empty text. `dispatch_workflow()` POSTs `/repos/{owner}/{repo}/actions/workflows/{file}/dispatches` (returns 204, no run id). `dispatch_and_correlate()` (serialized via a lazily-created per-event-loop asyncio lock — a module-level Lock breaks on Python 3.9) remembers the newest run id before dispatch, then polls for a newer `workflow_dispatch` run (matching `path` if the API returns it); if correlation fails it still returns success with `run_id=None` and the poll job falls back to a 90-min timeout. `get_run_status()` GETs `/actions/runs/{id}` with a list-based fallback for older Gitea. `list_runs()` handles both `{"workflow_runs": [...]}` and bare-list responses. `deploy_stand()`/`destroy_stand()` wrap dispatch with `mode=deploy|destroy`. Retry helper `_gitea_request_with_retry()` copied from the K8s module (429 → Retry-After, 5xx → exp backoff, timeout → retry, 4xx → raise).
 - `modules/create_k8s_cluster.py` — DigitalOcean DOKS API layer: `create_k8s_cluster()` (returns immediately, status=`provisioning`), `delete_k8s_cluster()`, `get_k8s_cluster()`, `get_k8s_versions()`, `get_k8s_sizes()` (both cached via `_get_k8s_options()` with 1h TTL), `wait_for_cluster_ready()` (polling), `get_kubeconfig()`. Retry logic via `_do_request_with_retry()`: 429 → Retry-After, 5xx → exp backoff, timeout → retry, 4xx → raise immediately.
 - `modules/notifications.py` — Sends event notifications to a Telegram channel. `send_notification()` for droplets (created/extended/deleted/auto_deleted/snapshot_created). `send_k8s_notification()` for clusters (created/ready/extended/deleted/auto_deleted/errored). `send_stand_notification()` for stands (created/ready/errored/extended/deleted/auto_deleted/destroy_failed); text built by `build_stand_notification_text()`, shared with the MM module.
 - `modules/mm_conversation.py` — `ConversationManager` in-memory state machine (replaces Telegram's `ConversationHandler`): `ConversationState`, `start()`, `get()`, `end()`, `cleanup_expired()`, 10-min timeout.
