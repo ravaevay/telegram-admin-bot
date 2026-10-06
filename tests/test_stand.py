@@ -6,8 +6,11 @@ from datetime import datetime, timedelta
 
 from modules.gitea_stands import (
     STAND_CATALOG,
+    EMPTY_VALUE_LABEL,
     build_stand_fqdn,
     build_stand_url,
+    format_param_default,
+    format_param_value,
     deploy_stand,
     destroy_stand,
     dispatch_workflow,
@@ -50,9 +53,48 @@ class TestStandCatalog:
                 if param["type"] == "choice":
                     assert param["default"] in param["options"]
 
+    def test_option_labels_cover_only_real_options(self):
+        for entry in STAND_CATALOG.values():
+            for param in entry["inputs"]:
+                labels = param.get("option_labels")
+                if labels:
+                    assert param["type"] == "choice"
+                    assert set(labels).issubset(set(param["options"]))
+
     def test_build_stand_url(self):
         assert build_stand_url("wordpress", "wp-test") == f"https://{build_stand_fqdn('wp-test')}/"
         assert build_stand_url("finebi", "bi") == f"https://{build_stand_fqdn('bi')}/webroot/decision"
+        assert build_stand_url("nuxeo", "nx") == f"https://{build_stand_fqdn('nx')}/nuxeo/ui/"
+
+    def test_new_services_present(self):
+        for service in ("confluence", "liferay", "nuxeo", "docspace"):
+            assert service in STAND_CATALOG
+
+    def test_docspace_inputs_match_workflow(self):
+        names = [param["name"] for param in STAND_CATALOG["docspace"]["inputs"]]
+        assert names == ["git_branch", "image_status", "docspace_version", "installation_type"]
+
+
+class TestParamLabels:
+    """Empty-string workflow inputs must still render a visible button label."""
+
+    def test_plain_value_passes_through(self):
+        assert format_param_value({}, "7.4.3") == "7.4.3"
+
+    def test_empty_value_gets_placeholder(self):
+        assert format_param_value({}, "") == EMPTY_VALUE_LABEL
+
+    def test_option_label_wins(self):
+        param = STAND_CATALOG["docspace"]["inputs"][1]
+        assert format_param_value(param, "") == "Публичный релиз"
+
+    def test_default_label_never_empty(self):
+        for entry in STAND_CATALOG.values():
+            for param in entry["inputs"]:
+                assert format_param_default(param)
+                if param["type"] == "choice":
+                    for option in param["options"]:
+                        assert format_param_value(param, option)
 
 
 class TestRunMatchesWorkflow:

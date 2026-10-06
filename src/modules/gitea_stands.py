@@ -138,7 +138,81 @@ STAND_CATALOG = {
             {"name": "connector_version", "label": "Версия коннектора", "type": "string", "default": "8.3.0"},
         ],
     },
+    "confluence": {
+        "workflow_file": "deploy-confluence.yml",
+        "url_path": "/",
+        "inputs": [
+            {"name": "connector_version", "label": "Версия коннектора", "type": "string", "default": "6.4.1"},
+        ],
+    },
+    "liferay": {
+        "workflow_file": "deploy-liferay.yml",
+        "url_path": "/",
+        "inputs": [
+            {"name": "liferay_version", "label": "Версия Liferay", "type": "string", "default": "7.4.3.132-ga132"},
+            {"name": "connector_version", "label": "Версия коннектора", "type": "string", "default": "3.1.0"},
+        ],
+    },
+    "nuxeo": {
+        "workflow_file": "deploy-nuxeo.yml",
+        "url_path": "/nuxeo/ui/",
+        "inputs": [
+            {"name": "nuxeo_version", "label": "Версия Nuxeo", "type": "string", "default": "10.10"},
+            {"name": "connector_version", "label": "Версия коннектора", "type": "string", "default": "1.1.0"},
+        ],
+    },
+    "docspace": {
+        "workflow_file": "deploy-docspace.yml",
+        "url_path": "/",
+        "inputs": [
+            {
+                "name": "git_branch",
+                "label": "Ветка docspace-buildtools",
+                "type": "string",
+                "default": "develop",
+            },
+            {
+                "name": "image_status",
+                "label": "Набор образов",
+                "type": "choice",
+                "options": ["4testing-", ""],
+                "option_labels": {"4testing-": "4testing- (приватные сборки)", "": "Публичный релиз"},
+                "default": "4testing-",
+            },
+            {
+                "name": "docspace_version",
+                "label": "Тег образа DocSpace (пусто — самый свежий)",
+                "type": "string",
+                "default": "",
+            },
+            {
+                "name": "installation_type",
+                "label": "Редакция",
+                "type": "choice",
+                "options": ["COMMUNITY", "DEVELOPER", "ENTERPRISE"],
+                "default": "COMMUNITY",
+            },
+        ],
+    },
 }
+
+# Placeholder for workflow inputs whose value is an empty string (DocSpace uses
+# "" for "public release images" / "newest tag"). Telegram rejects buttons with
+# empty text, so every rendered label has to fall back to something visible.
+EMPTY_VALUE_LABEL = "(пусто)"
+
+
+def format_param_value(param, value):
+    """Display label for one value of a workflow input."""
+    labels = param.get("option_labels") or {}
+    if value in labels:
+        return labels[value]
+    return value if value else EMPTY_VALUE_LABEL
+
+
+def format_param_default(param):
+    """Display label for a workflow input's default value."""
+    return format_param_value(param, param["default"])
 
 
 def _runs_api_base():

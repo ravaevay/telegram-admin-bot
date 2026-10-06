@@ -16,7 +16,7 @@
 - ✅ Создавать управляемые K8s кластеры (DOKS) на определённый срок
 - ✅ Отслеживать статус создания кластера и уведомлять, когда кластер готов
 - ✅ Продлевать или удалять K8s кластеры из интерфейса бота
-- ✅ Разворачивать тестовые стенды через Gitea Actions из [stands-for-connectors](https://git.onlyoffice.com/ONLYOFFICE-DevOps/stands-for-connectors) (WordPress, Moodle, Odoo, Drupal, Jira, Plone и др.)
+- ✅ Разворачивать тестовые стенды через Gitea Actions из [stands-for-connectors](https://git.onlyoffice.com/ONLYOFFICE-DevOps/stands-for-connectors) — 16 сервисов (WordPress, Moodle, Odoo, Drupal, Jira, Plone, Confluence, Liferay, Nuxeo, DocSpace и др.)
 - ✅ Задавать параметры workflow стенда (версия приложения, ветка/версия коннектора) с дефолтами
 - ✅ Отслеживать статус деплоя стенда и уведомлять о готовности (HTTPS через Let's Encrypt)
 - ✅ Продлевать и удалять стенды (удаление — через destroy-workflow, terraform destroy)
@@ -201,7 +201,7 @@ GitHub Actions (`.github/workflows/ci.yml`) автоматически запу�
 	-	Пользователь может продлить срок аренды или удалить кластер сразу
 	-	Снэпшот перед удалением не создаётся (DOKS не поддерживает эту операцию)
 6.	Создание тестового стенда (Gitea Actions)
-	-	Бот предлагает выбрать сервис из [stands-for-connectors](https://git.onlyoffice.com/ONLYOFFICE-DevOps/stands-for-connectors) (WordPress, Moodle, Odoo, Drupal, FineBI, Plone, Jira, Mattermost, Dropbox, HumHub, ownCloud, Alfresco)
+	-	Бот предлагает выбрать сервис из [stands-for-connectors](https://git.onlyoffice.com/ONLYOFFICE-DevOps/stands-for-connectors) (WordPress, Moodle, Odoo, Drupal, FineBI, Plone, Jira, Mattermost, Dropbox, HumHub, ownCloud, Alfresco, Confluence, Liferay, Nuxeo, DocSpace)
 	-	Запрашивает субдомен — стенд будет доступен как `<субдомен>.onlyoffice.fun` (HTTPS через Let's Encrypt)
 	-	Последовательно запрашивает параметры workflow (версия приложения, ветка/версия коннектора) — у каждого есть кнопка «По умолчанию»
 	-	Показывает выбор длительности аренды
