@@ -67,7 +67,7 @@ class TestStandCatalog:
         assert build_stand_url("nuxeo", "nx") == f"https://{build_stand_fqdn('nx')}/nuxeo/ui/"
 
     def test_new_services_present(self):
-        for service in ("confluence", "liferay", "nuxeo", "docspace"):
+        for service in ("confluence", "liferay", "nuxeo", "docspace", "chamilo"):
             assert service in STAND_CATALOG
 
     def test_docspace_inputs_match_workflow(self):
