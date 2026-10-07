@@ -1,6 +1,8 @@
-from unittest.mock import patch
+from unittest.mock import AsyncMock, MagicMock
 
-from bot import _build_ssh_key_keyboard
+import pytest
+
+from bot import SUBDOMAIN_RE, STAND_INPUT_PARAM, _build_ssh_key_keyboard, stand_input_subdomain
 
 
 def _make_keys(n):
@@ -101,3 +103,65 @@ class TestSshKeyPreferenceReordering:
         assert reordered[1]["id"] == 3
         assert reordered[2]["id"] == 1
         assert preselect == {"5", "3", "1"}
+
+
+class TestSubdomainRegex:
+    """SUBDOMAIN_RE encodes the lower-case DNS label rule the stand workflows enforce."""
+
+    def test_accepts_plain_label(self):
+        assert SUBDOMAIN_RE.match("popov-chamilo")
+
+    def test_accepts_single_character(self):
+        assert SUBDOMAIN_RE.match("a")
+
+    def test_accepts_max_length(self):
+        assert SUBDOMAIN_RE.match("a" * 63)
+
+    def test_rejects_too_long(self):
+        assert not SUBDOMAIN_RE.match("a" * 64)
+
+    def test_rejects_uppercase(self):
+        assert not SUBDOMAIN_RE.match("Popov-Chamilo")
+
+    def test_rejects_leading_hyphen(self):
+        assert not SUBDOMAIN_RE.match("-chamilo")
+
+    def test_rejects_trailing_hyphen(self):
+        assert not SUBDOMAIN_RE.match("chamilo-")
+
+    def test_rejects_dot(self):
+        assert not SUBDOMAIN_RE.match("stand.chamilo")
+
+
+@pytest.mark.asyncio
+class TestStandSubdomainNormalization:
+    """Mixed-case input is normalized before it reaches the workflow dispatch."""
+
+    @staticmethod
+    def _make_update(text):
+        update = MagicMock()
+        update.message.text = text
+        update.message.reply_text = AsyncMock()
+        return update
+
+    @staticmethod
+    def _make_context():
+        context = MagicMock()
+        context.user_data = {"stand_service": "wordpress"}
+        return context
+
+    async def test_uppercase_input_is_lowercased(self):
+        update, context = self._make_update("  Popov-Chamilo  "), self._make_context()
+
+        state = await stand_input_subdomain(update, context)
+
+        assert state == STAND_INPUT_PARAM
+        assert context.user_data["stand_subdomain"] == "popov-chamilo"
+
+    async def test_invalid_subdomain_reprompts(self):
+        update, context = self._make_update("bad_subdomain"), self._make_context()
+
+        await stand_input_subdomain(update, context)
+
+        assert "stand_subdomain" not in context.user_data
+        update.message.reply_text.assert_awaited_once()

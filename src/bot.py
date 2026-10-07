@@ -102,7 +102,9 @@ K8S_POLL_INTERVAL_SECONDS = 30  # poll provisioning clusters every 30s
 CONVERSATION_TIMEOUT = 600  # 10 minutes
 
 DROPLET_NAME_RE = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9._-]{0,253}[a-zA-Z0-9]$")
-SUBDOMAIN_RE = re.compile(r"^[a-zA-Z0-9]([a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?$")
+# Input is lower-cased before this is applied; the stand workflows validate the
+# subdomain against the same lower-case DNS label rule and fail the run otherwise.
+SUBDOMAIN_RE = re.compile(r"^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$")
 
 # ConversationHandler states
 MAIL_INPUT = 0
