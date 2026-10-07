@@ -138,6 +138,14 @@ STAND_CATALOG = {
             {"name": "connector_version", "label": "Версия коннектора", "type": "string", "default": "8.3.0"},
         ],
     },
+    "chamilo": {
+        "workflow_file": "deploy-chamilo.yml",
+        "url_path": "/",
+        "inputs": [
+            {"name": "chamilo_version", "label": "Версия Chamilo", "type": "string", "default": "1.11.40"},
+            {"name": "connector_version", "label": "Версия коннектора", "type": "string", "default": "1.6.0"},
+        ],
+    },
     "confluence": {
         "workflow_file": "deploy-confluence.yml",
         "url_path": "/",
